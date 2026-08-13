@@ -99,6 +99,8 @@ function resetMock() {
   mock.runs.length = 0;
   mock.createDelayMs = 0;
   mock.fireTool = null;
+  mock.finishAfterTool = false;
+  mock.deadStream = false;
   mock.lastCustomTools = null;
   mock.pendingExec = null;
 }
@@ -239,6 +241,36 @@ test("launch timeout: account released, late-arriving run cancelled", async () =
   config.maxAccountAttempts = 3;
 });
 
+
+// ── B2: consume deadline — upstream death without stream end ──────
+// An upstream that dies without ending its stream (and swallows cancel)
+// leaves consume's finally unreachable: the account's in-flight slot would
+// leak for the process's lifetime. The deadline is the backstop that forces
+// the release. waitTurn's idle path fires first (1s) and attempts the
+// cancel; with the cancel ineffective only the deadline can free the slot.
+test("consume deadline: a never-ending stream (cancel ineffective) releases the reservation", async () => {
+  try {
+    resetMock();
+    config.turnIdleTimeoutMs = 1000;
+    config.toolResultTimeoutMs = 300; // deadline = 2*1000 + 300 = 2300ms
+    mock.deadStream = true;
+    const res = fakeRes();
+    await A.handleMessages({ model: "claude-opus-5", messages: [{ role: "user", content: "hi" }] }, res);
+    const acc = held();
+    assert.ok(acc, "the launch must hold exactly one reservation");
+
+    // Idle fires at ~1s (inside handle), the deadline at 2.3s (from handle
+    // start). This check lands between the two.
+    await sleep(400);
+    assert.equal(mock.cancels.length, 1, "the idle path must attempt a cancel");
+    assert.equal(acc.inflight, 1, "an ineffective cancel must leave the reservation held");
+
+    await sleep(1200); // past the 2300ms deadline
+    assert.equal(acc.inflight, 0, "the deadline must force the release");
+  } finally {
+    mock.deadStream = false; // unblock the leaked generator before the next test
+  }
+});
 
 // ── reviewer M1 regression: a turn that FINISHED during the idle wait is
 // a success, not an idle failure (tool round-trip where the run completes

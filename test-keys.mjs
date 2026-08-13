@@ -1173,6 +1173,67 @@ test("ledger: per-account entries are capped at 200, least-recently-active evict
   assert.ok(!ids.includes("cap-10"), "the least-recently-active entry is evicted");
 });
 
+// ── P2: recent requests ring ───────────────────────────
+test("recent: ring caps at 500, chronological, full fields", () => {
+  const acc = pool.all()[0]; // D1, present in the pool (name lookup target)
+  const t0 = Date.now();
+  for (let i = 0; i < 510; i++) {
+    pool.pushRecentRequest({
+      ts: new Date(t0 + i).toISOString(),
+      model: "claude-opus-5",
+      accountId: acc.id,
+      success: true,
+      ms: i,
+      tokens: { input: i, output: i + 1, cacheRead: i * 2, cacheWrite: 0 },
+    });
+  }
+  // Last push carries an over-long error: the ring must truncate it.
+  pool.pushRecentRequest({
+    ts: new Date(t0 + 510).toISOString(),
+    model: "claude-opus-5",
+    accountId: acc.id,
+    success: false,
+    ms: 510,
+    tokens: {},
+    error: "e".repeat(250),
+  });
+  const list = pool.listRecentRequests();
+  assert.equal(list.length, 500, "only the newest 500 survive");
+  // Earlier settle pushes (relay tests) sit at the front; every slot after
+  // them is ours. Work in relative ms so the count is what's asserted.
+  const mine = list.filter((r) => r.accountId === acc.id);
+  assert.equal(mine.length, 500, "earlier entries (relay settle tests) were pushed out");
+  for (let i = 1; i < mine.length; i++) {
+    assert.equal(mine[i].ms, mine[i - 1].ms + 1, "kept pushes are consecutive, oldest first");
+  }
+  const newest = mine.at(-1);
+  assert.equal(newest.ms, 510, "the newest entry is last");
+  assert.equal(newest.success, false, "a failure is recorded too");
+  assert.equal(newest.error.length, 200, "error truncated to 200 chars");
+  assert.equal(newest.accountName, acc.name, "display name resolved from the pool");
+  assert.equal(typeof newest.ts, "string", "ts is an ISO string");
+  assert.equal(Number.isInteger(newest.ms), true);
+  assert.deepEqual(newest.tokens, {}, "empty tokens pass through");
+  assert.deepEqual(
+    mine[100].tokens,
+    { input: mine[100].ms, output: mine[100].ms + 1, cacheRead: mine[100].ms * 2, cacheWrite: 0 },
+    "token fields survive the ring",
+  );
+  for (let i = 1; i < list.length; i++) {
+    assert.ok(list[i].ts >= list[i - 1].ts, "chronological order");
+  }
+});
+
+test("recent: unknown account omits the name; n bounds work", () => {
+  pool.pushRecentRequest({ ts: new Date().toISOString(), model: "m", accountId: "ffffffffffff", success: true, ms: 1, tokens: {} });
+  const one = pool.listRecentRequests(1);
+  assert.equal(one.length, 1);
+  assert.equal(one[0].accountId, "ffffffffffff");
+  assert.equal("accountName" in one[0], false, "a gone account must omit the name");
+  assert.equal(pool.listRecentRequests(0).length, 0, "n=0 yields nothing");
+  assert.equal(pool.listRecentRequests(10_000).length, 500, "n is capped by the ring");
+});
+
 // ── P2: pool event subscriptions ───────────────────────
 test("pool events: disable / cooldown / half-open transitions fire", () => {
   const events = [];

@@ -43,6 +43,8 @@ runtime-config.json（热覆盖层） → env（CURSOR_*） → 默认值（sett
 | `CURSOR_LOG_LEVEL` | `logLevel` | `info` | 热更 | — | debug / info / warn / error |
 | `CURSOR_PROXY` | `proxy` | 空 | 重启 | — | 上游 HTTP 代理（如 `http://127.0.0.1:10808`）。国内部署必填：Cursor 按出口区域限制推理流，且 SDK 的 HTTP/2 传输忽略系统代理。设置后强制 HTTP/1.1 + CONNECT 隧道（白名单域名见 [ARCHITECTURE.md](ARCHITECTURE.md#8-上游代理隧道proxy-tunnelmjs)），REST 侧走 undici ProxyAgent；空 = 直连 |
 | `CURSOR_WORKSPACE` | `workspace` | `/work` | 重启 | — | agent 工作目录。工具中继模式会关掉内置文件工具，但 SDK 仍要求一个工作区 |
+| `CURSOR_RATE_LIMIT_PER_MIN` | —（静态 env） | `0` | 重启 | — | 数据面（`/v1/*`）每-IP 60s 固定窗口限流。`0` = 关（默认）；`>0` 每 IP 每分钟请求上限，超限回 429 + `Retry-After`。只挡数据面，管理面不受影响。故意不进热更：洪峰不能靠热配置关掉自己的守卫 |
+| `CURSOR_TRUSTED_PROXY` | —（静态 env） | 空 | 重启 | — | 信任的反向代理 IP（逗号分隔）。**设了之后**才相信这些对端发来的 `X-Forwarded-For`（限流身份取最右公网段）；不设则一律忽略 XFF，用 socket 地址做限流身份——未信任的客户端可以在 XFF 里填任意公网 IP 每次换新桶，绝不能信。国内部署若前面有 Caddy/nginx 反代，把反代 IP 填这里 |
 
 ## 只存在于 env 的开关（不进 runtime-config.json）
 

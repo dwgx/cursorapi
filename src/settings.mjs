@@ -85,6 +85,20 @@ export const config = {
   // from seeing pool internals.
   adminKey: process.env.CURSOR_ADMIN_KEY ?? "",
 
+  // Per-IP fixed-window rate limit on the data plane (/v1/* only; the
+  // admin plane has its own login-delay penalty). 0 = disabled (default);
+  // >0 caps requests per IP per 60s window. Static on purpose: a flood
+  // must not be able to disable its own guard via the hot config.
+  rateLimitPerMin: envInt("CURSOR_RATE_LIMIT_PER_MIN", 0),
+
+  // Trusted reverse proxies (comma-separated IPs) whose X-Forwarded-For
+  // header may be believed for the rate-limit identity. Empty (default) =
+  // XFF is ignored entirely and the socket address is the identity — an
+  // untrusted client can put any public IP in XFF and earn a fresh bucket
+  // per request, so the header must not be believed unless the socket peer
+  // is a proxy you operate.
+  trustedProxy: envList("CURSOR_TRUSTED_PROXY"),
+
   // External model-name prefix; empty = raw Cursor ids.
   prefix: process.env.CURSOR_PREFIX ?? "",
 

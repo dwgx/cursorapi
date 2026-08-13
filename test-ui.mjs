@@ -166,6 +166,21 @@ test("logout: the session dies immediately", async () => {
   assert.equal((await fetch(`${BASE}/admin/status`, { headers: sess })).status, 401);
 });
 
+test("requests route: 401 unauthenticated, 200 with items for admins", async () => {
+  const anon = await fetch(`${BASE}/admin/requests`);
+  assert.equal(anon.status, 401, "APIs without a session 401");
+  const r = await fetch(`${BASE}/admin/requests`, { headers: auth });
+  assert.equal(r.status, 200);
+  const j = await r.json();
+  assert.ok(Array.isArray(j.items), "items array");
+  const small = await fetch(`${BASE}/admin/requests?limit=3`, { headers: auth });
+  assert.ok((await small.json()).items.length <= 3, "limit is honored");
+  const huge = await fetch(`${BASE}/admin/requests?limit=9999`, { headers: auth });
+  assert.ok((await huge.json()).items.length <= 500, "limit is capped at 500");
+  const garbage = await fetch(`${BASE}/admin/requests?limit=abc`, { headers: auth });
+  assert.ok((await garbage.json()).items.length <= 50, "garbage limit falls back to the default");
+});
+
 test("readBody: a stalled request body gets 408, never a hang", async () => {
   // One byte then silence: the server must cut the read off at the deadline
   // (500ms in the test env) with a 408 instead of holding the connection.
@@ -265,6 +280,10 @@ test("script: executes in a fake DOM and every core UI action fires its endpoint
           }
         : u.includes("update/check") ? { mode: "docker", current: "0.1.0", latest: "0.2.0", behind: 1, hasUpdate: true }
         : u.includes("update/status") ? { state: "idle", message: "" }
+        : u.includes("requests") ? { items: [
+              { ts: 1720000000000, model: "claude-opus-5", accountId: "acc_12345678", accountName: "测试号", success: true, ms: 812, tokens: { input: 1200, output: 340, cacheRead: 50, cacheWrite: 0 } },
+              { ts: 1720000000100, model: "gpt-5", accountId: "acc_87654321", success: false, ms: 3001, error: "rate limit exceeded" },
+            ] }
         : u.includes("config") ? { config: {
               prefix: "", maxAccountAttempts: 3, probeIntervalMs: 1800000, showToolActivity: true,
               turnIdleTimeoutMs: 600000, toolResultTimeoutMs: 600000, logLevel: "info",
@@ -337,6 +356,63 @@ test("script: the new panels — accounts / logs / stats / settings / update", a
   await settle();
 });
 
+// ── 左下角 / 头部按钮布局 ─────────────────────────────
+test("page: footer has 退出登录 + 设置, header carries the theme toggle", () => {
+  const footer = /<div class="footer-actions">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+  assert.ok(footer.includes("退出登录"), "the footer button must read 退出登录, not 注销");
+  assert.ok(footer.includes('onclick="logout()"'), "logout handler must survive the rename");
+  assert.ok(footer.includes("设置") && footer.includes('onclick="go(\'settings\')"'), "footer must carry a 设置 button");
+  assert.ok(!footer.includes('id="tb"'), "the theme toggle must leave the footer");
+  const header = /<div class="page-header">([\s\S]*?)<\/section/.exec(html)?.[1] ?? "";
+  assert.ok(header.includes('id="tb"'), "the theme toggle must live in the page header");
+  assert.ok(header.includes("toggleTheme()"), "the header toggle must still call toggleTheme");
+});
+
+// ── 日志页最近请求表 ───────────────────────────────────
+test("logs view: 最近请求 table renders rows and expands inline detail", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 60));
+  await sandbox.go("logs");
+  await settle();
+  const v = $("view-logs").innerHTML;
+  assert.ok(v.includes("最近请求"), "logs view must carry a 最近请求 section");
+  assert.ok(v.includes("一个请求一行"), "the section subtitle must describe the table");
+  assert.ok(v.includes("/admin/requests"), "the section must name its data source");
+  const t = $("req-table").innerHTML;
+  assert.ok(t.includes("claude-opus-5"), "a mocked request row must render: " + t);
+  assert.ok(t.includes("测试号"), "accountName must win over accountId: " + t);
+  assert.ok(t.includes("acc_8765"), "fallback shows the first 8 chars of accountId: " + t);
+  assert.ok(t.includes("rate limit exceeded"), "failure rows must carry the error in a title: " + t);
+  assert.ok(t.includes('<span class="badge success">成功</span>'), "success rows get a green badge: " + t);
+  assert.ok(t.includes('<span class="badge error"'), "failure rows get a red badge: " + t);
+  sandbox.reqRow(0);
+  const t2 = $("req-table").innerHTML;
+  assert.ok(t2.includes("detail-row"), "clicking a row must expand its detail: " + t2);
+  assert.ok(t2.includes("Token 缓存读"), "the detail must show all token fields: " + t2);
+});
+
+// ── 统计页图例 ─────────────────────────────────────────
+test("stats view: both chart cards carry a legend with interval totals", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  await sandbox.go("stats");
+  await settle();
+  const v = $("view-stats").innerHTML;
+  const n = (v.match(/class="chart-legend"/g) || []).length;
+  assert.ok(n >= 2, "both chart cards must carry a legend, got " + n);
+  assert.ok(v.includes("cl-val"), "legends must show the interval total: " + v);
+  assert.ok(v.includes("93.6%"), "the success-rate legend must carry the range total: " + v);
+});
+
+// ── 接入信息页复制按钮 ─────────────────────────────────
+test("conn view: copy buttons render and copyText tolerates a clipboard-less sandbox", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  await sandbox.go("conn");
+  await settle();
+  const v = $("view-conn").innerHTML;
+  const n = (v.match(/onclick="copyText\(\d+\)"/g) || []).length;
+  assert.ok(n >= 5, "expected at least 5 copy buttons (2 base URL + 2 curl + 1 env), got " + n);
+  sandbox.copyText(0); // must not throw: no navigator / clipboard / execCommand in the sandbox
+});
+
 test("update: a 409 perform renders a readable error bar, and an unchanged version reads as rollback", async () => {
   const old = performMock;
   performMock = () => ({
@@ -400,6 +476,157 @@ test("login script: clicking enter sends exactly one POST to /admin/login", asyn
   assert.equal(u.pathname, "/admin/login", `login request went to ${u.pathname}`);
   assert.equal((hit[0].init?.method ?? "").toUpperCase(), "POST");
   assert.ok(JSON.parse(hit[0].init.body).key === "口令", "the password goes in the body, not the URL (URLs end up in logs)");
+});
+
+// ── M1：请求表刷新风暴 ─────────────────────────────────
+test("M1: maybeRefreshRequests never overlaps and backs off after failures", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  sandbox.reqBusy = false; sandbox.reqFailAt = 0; sandbox.reqAt = 0; sandbox.reqData = null;
+  const n0 = asked.length;
+  sandbox.maybeRefreshRequests();
+  assert.equal(asked.length, n0 + 1, "empty cache must refresh immediately");
+  await settle();
+  assert.ok(sandbox.reqAt > 0, "reqAt must be updated on completion, not start");
+  assert.equal(sandbox.reqFailAt, 0, "a successful load must clear the failure backoff");
+  const n1 = asked.length;
+  sandbox.reqFailAt = Date.now() - 5000;   // inside the 10s backoff window
+  sandbox.reqAt = 0;
+  sandbox.maybeRefreshRequests();
+  assert.equal(asked.length, n1, "within the 10s backoff no refresh may fire");
+  sandbox.reqFailAt = 0;
+  sandbox.maybeRefreshRequests();
+  assert.equal(asked.length, n1 + 1, "after the backoff a refresh must fire");
+  sandbox.reqBusy = true;
+  sandbox.maybeRefreshRequests();
+  assert.equal(asked.length, n1 + 1, "busy must suppress a second in-flight request");
+  sandbox.reqBusy = false;
+  await settle();
+});
+
+// ── M2：切区间后图例合计值同步重算 ─────────────────────
+test("M2: switching the chart range recomputes the legend totals", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  await sandbox.go("stats");
+  await settle();
+  const buckets = [];
+  for (let i = 0; i < 48; i++) buckets.push({ t: "h" + i, requests: 1, success: 1, errors: 0 });
+  sandbox.statsData.hourlyBuckets = buckets;
+  sandbox.drawCharts();
+  assert.equal($("lr-req").textContent, "24", "24h legend must total the last 24 buckets");
+  sandbox.chartRange("6h");
+  assert.equal($("lr-req").textContent, "6", "6h legend must total the last 6 buckets");
+  sandbox.chartRange("30d");
+  assert.equal($("lr-req").textContent, "48", "30d legend must total all buckets");
+  assert.equal($("lr-suc").textContent, "100%", "the success-rate legend must follow too");
+  sandbox.chartRange("24h");
+  assert.equal($("lr-req").textContent, "24", "back on 24h the legend must match again");
+});
+
+// ── 账号搜索 ────────────────────────────────────────────
+test("accounts: the toolbar search filters rows by name/email/key/id", async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  await sandbox.go("accounts");
+  await settle();
+  assert.ok($("view-accounts").innerHTML.includes('id="af-q"'), "the accounts toolbar must carry a search input");
+  sandbox.data.accounts = [
+    { id: "acc_one", name: "测试号", email: "a@x.com", maskedKey: "crsr_1111…", priority: 0, runs: 0, inputTokens: 0, outputTokens: 0, lastUsedAt: null },
+    { id: "acc_two", name: "另一个号", email: "b@x.com", maskedKey: "crsr_2222…", priority: 0, runs: 0, inputTokens: 0, outputTokens: 0, lastUsedAt: null },
+  ];
+  $("af-q").value = "另一个";
+  sandbox.onAcctSearch();
+  await new Promise((r) => setTimeout(r, 300));   // debounce is 200ms
+  let t = $("acct-table").innerHTML;
+  assert.ok(t.includes("acc_two"), "the matching row must stay: " + t);
+  assert.ok(!t.includes("acc_one"), "non-matching rows must be filtered out: " + t);
+  $("af-q").value = "crsr_2222";                   // masked-key match
+  sandbox.onAcctSearch();
+  await new Promise((r) => setTimeout(r, 300));
+  t = $("acct-table").innerHTML;
+  assert.ok(t.includes("acc_two") && !t.includes("acc_one"), "masked key must be searchable");
+  $("af-q").value = "";
+  sandbox.onAcctSearch();
+  await new Promise((r) => setTimeout(r, 300));
+  t = $("acct-table").innerHTML;
+  assert.ok(t.includes("acc_one") && t.includes("acc_two"), "empty query must restore all rows");
+});
+
+// ── ESC 退出登录 ────────────────────────────────────────
+test("ESC: no open modal -> askConfirm logout; open modal or other keys are ignored", async () => {
+  $("modal").innerHTML = "";
+  sandbox.onKeyDown({ key: "Escape" });
+  assert.ok($("modal").innerHTML.includes("确认操作"), "ESC must pop the confirm modal");
+  assert.ok($("modal").innerHTML.includes("退出登录"), "the confirm must mention logout");
+  sandbox.closeModal();
+  sandbox.onKeyDown({ keyCode: 27 });
+  assert.ok($("modal").innerHTML.includes("确认操作"), "legacy keyCode 27 must be recognized too");
+  sandbox.closeModal();
+  $("modal").innerHTML = "already-open";
+  sandbox.onKeyDown({ key: "Escape" });
+  assert.equal($("modal").innerHTML, "already-open", "ESC must not disturb an open modal");
+  sandbox.onKeyDown({ key: "Enter" });
+  assert.equal($("modal").innerHTML, "already-open", "other keys must be ignored");
+  sandbox.closeModal();
+});
+
+// ── 冷却倒计时 ──────────────────────────────────────────
+test("accounts: cooldown renders a live countdown; coolFmt follows H:MM:SS / MM:SS", async () => {
+  assert.equal(sandbox.coolFmt(10925000), "3:02:05", ">1h must be H:MM:SS");
+  assert.equal(sandbox.coolFmt(65000), "01:05", "<=1h must be MM:SS");
+  assert.equal(sandbox.coolFmt(0), "00:00", "zero stays zero");
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+  await sandbox.go("accounts");
+  await settle();
+  const id = sandbox.data.accounts[0].id;
+  sandbox.data.accounts[0].cooldownUntil = new Date(Date.now() + 3 * 3600 * 1000).toISOString();
+  sandbox.renderAccountsTable();
+  sandbox.toggleExp(id);
+  const t = $("acct-table").innerHTML;
+  assert.ok(t.includes("cool-cd"), "the expanded detail must carry a countdown cell: " + t.slice(0, 120));
+  assert.ok(t.includes("冷却中 剩余"), "the cell must read 冷却中 剩余 ...");
+  assert.ok(t.includes('data-cu="'), "the cell must keep the absolute cooldown time for the ticker");
+  delete sandbox.data.accounts[0].cooldownUntil;
+  sandbox.toggleExp(id);
+});
+
+// ── 日志断流自动重连 ────────────────────────────────────
+test("logs: a dropped stream schedules exponential-backoff reconnect; nostream/stop/abort do not", async () => {
+  assert.equal(typeof sandbox.scheduleLogRetry, "function", "auto-reconnect must exist");
+  const oldFetch = sandbox.fetch;
+  sandbox.view = "logs";
+  sandbox.logRetryTimer = null;
+  sandbox.logRetryDelay = 0;
+  const wait = () => new Promise((r) => setTimeout(r, 40));
+  try {
+    sandbox.fetch = async () => { throw new Error("network down"); };
+    sandbox.startLogs();
+    await wait();
+    assert.ok(sandbox.logRetryTimer !== null, "a drop on the logs view must schedule a retry");
+    assert.equal(sandbox.logRetryDelay, 2000, "first retry waits 2s");
+    clearTimeout(sandbox.logRetryTimer); sandbox.logRetryTimer = null;
+    sandbox.logRetryDelay = 16000;
+    sandbox.scheduleLogRetry();
+    assert.equal(sandbox.logRetryDelay, 30000, "backoff must cap at 30s");
+    clearTimeout(sandbox.logRetryTimer); sandbox.logRetryTimer = null;
+    sandbox.fetch = async () => ({ ok: true, status: 200, text: async () => "{}" }); // no body -> nostream
+    sandbox.startLogs();
+    await wait();
+    assert.equal(sandbox.logRetryTimer, null, "nostream is permanent, no retry scheduled");
+    sandbox.fetch = async () => { throw new Error("network down"); };
+    sandbox.startLogs();
+    await wait();
+    assert.ok(sandbox.logRetryTimer !== null, "drop again to arm a pending retry");
+    sandbox.stopLogs();
+    assert.equal(sandbox.logRetryTimer, null, "leaving the logs view must cancel the pending retry");
+    sandbox.view = "logs";
+    sandbox.fetch = async () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); };
+    sandbox.startLogs();
+    await wait();
+    assert.equal(sandbox.logRetryTimer, null, "a manual abort must not schedule a retry");
+  } finally {
+    sandbox.fetch = oldFetch;
+    if (sandbox.logRetryTimer) { clearTimeout(sandbox.logRetryTimer); sandbox.logRetryTimer = null; }
+    sandbox.logRetryDelay = 0;
+  }
 });
 
 // ── coverage ────────────────────────────────────────────

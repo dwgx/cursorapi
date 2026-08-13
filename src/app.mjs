@@ -232,6 +232,13 @@ async function serveStatsRoutes(req, res, path) {
     respondJson(res, 200, pool.getStats());
     return true;
   }
+  if (path === "/admin/requests" && req.method === "GET") {
+    const raw = new URL(req.url, "http://localhost").searchParams.get("limit");
+    const n = Number.parseInt(raw ?? "", 10);
+    const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 500) : 50;
+    respondJson(res, 200, { items: pool.listRecentRequests(limit) });
+    return true;
+  }
   return false;
 }
 
@@ -387,6 +394,114 @@ async function serveAccountRoutes(req, res, path, readJson, run) {
   return false;
 }
 
+// ── Data-plane rate limiting (per-IP fixed window) ──
+
+const RATE_WINDOW_MS = 60_000;
+const RATE_IP_CAP = 10_000;
+
+/** IPv4-mapped IPv6 ("::ffff:1.2.3.4") is the dual-stack socket form; the
+ * same client must not split into two buckets depending on how it arrived. */
+function normalizeIp(ip) {
+  const m4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(String(ip));
+  return m4 ? m4[1] : String(ip);
+}
+
+/**
+ * Public-address check for X-Forwarded-For. Only clearly-public addresses
+ * are trusted as a client identity; private/loopback/link-local ranges are
+ * trivially forgeable by any client behind the same proxy, so they fall
+ * back to the socket address.
+ */
+export function isPublicIp(ip) {
+  const v = normalizeIp(ip);
+  const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (parts) {
+    const a = +parts[1];
+    const b = +parts[2];
+    const c = +parts[3];
+    const d = +parts[4];
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    if (a === 0 || a === 10 || a === 127) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
+    if (a === 169 && b === 254) return false;           // link-local
+    if (a === 172 && b >= 16 && b <= 31) return false;  // 172.16/12
+    if (a === 192 && b === 168) return false;           // 192.168/16
+    if (a >= 224) return false;                         // multicast + reserved
+    return true;
+  }
+  if (v.includes(":")) {
+    const low = v.toLowerCase();
+    if (low === "::" || low === "::1") return false;
+    if (/^f[cd]/.test(low) || /^fe[89ab]/.test(low)) return false; // ULA / link-local
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The identity a request is rate-limited under. X-Forwarded-For is only
+ * believed when the socket peer is a configured trusted proxy
+ * (CURSOR_TRUSTED_PROXY): an untrusted client can forge any public IP in
+ * XFF and earn a fresh bucket per request, so without a trusted proxy the
+ * socket address is the identity. Through a trusted proxy, only the
+ * rightmost segment is believed, and only when it is a public address — a
+ * forged private/loopback segment falls back to the socket address.
+ */
+export function clientIp(req) {
+  const sock = normalizeIp(req.socket?.remoteAddress ?? "");
+  const trusted = config.trustedProxy;
+  if (!trusted || !trusted.includes(sock)) return sock;
+  const hops = String(req.headers["x-forwarded-for"] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fwd = hops[hops.length - 1];
+  if (fwd && isPublicIp(fwd)) return normalizeIp(fwd);
+  return sock;
+}
+
+/**
+ * Per-IP fixed-window counter. `check` returns null when the request is
+ * allowed and the ms until the window resets when it is over. The bucket
+ * map is capped: past `cap` tracked IPs, expired windows are swept and the
+ * oldest survivors evicted, so a spoofing flood cannot grow memory forever.
+ * The window is injectable so tests can run the 60s cycle in milliseconds.
+ */
+export function createRateLimiter({ windowMs = RATE_WINDOW_MS, cap = RATE_IP_CAP } = {}) {
+  const buckets = new Map(); // ip -> { count, resetAt }
+  return {
+    check(req, now = Date.now()) {
+      const limit = config.rateLimitPerMin;
+      if (!(limit > 0)) return null;
+      const ip = clientIp(req);
+      let b = buckets.get(ip);
+      if (!b || now >= b.resetAt) {
+        b = { count: 0, resetAt: now + windowMs };
+        buckets.set(ip, b);
+      }
+      b.count += 1;
+      if (buckets.size > cap) {
+        for (const [k, x] of buckets) {
+          if (now >= x.resetAt) buckets.delete(k);
+          if (buckets.size <= cap) break;
+        }
+        if (buckets.size > cap) {
+          for (const k of buckets.keys()) {
+            buckets.delete(k);
+            if (buckets.size <= cap) break;
+          }
+        }
+      }
+      return b.count > limit ? b.resetAt - now : null;
+    },
+    size() {
+      return buckets.size;
+    },
+  };
+}
+
+const rateLimiter = createRateLimiter();
+
 // ── Data domain ──
 
 async function serveModels(req, res) {
@@ -420,6 +535,15 @@ async function serveProtocol(req, res, isChat) {
 async function dispatchData(req, res, path) {
   if (!isClient(req.headers)) {
     respondError(res, 401, "missing or invalid API Key", "authentication_error");
+    return;
+  }
+  // Per-IP window on the data plane (the admin plane keeps its own
+  // login-delay penalty). After auth, before processing: a keyless flood
+  // never counts, and a 10k rps client is stopped before the pool sees it.
+  const retryAfterMs = rateLimiter.check(req);
+  if (retryAfterMs != null) {
+    res.setHeader("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+    respondError(res, 429, "rate limit exceeded for this IP", "rate_limit_error");
     return;
   }
   if (path === "/v1/models" && req.method === "GET") {
