@@ -6,7 +6,7 @@
   "main": "src/app.mjs",
   "scripts": {
     "start": "node boot.mjs",
-    "test": "node test-keys.mjs && node test-format.mjs && node test-protocol.mjs && node test-tool-relay.mjs && node test-guard-auth.mjs && node test-http-helpers.mjs && node test-logger.mjs && node test-ui.mjs && node test-sessionauth.mjs && node test-runtime-settings.mjs && node test-updater.mjs && node test-relay-cancel.mjs && node test-relay-hook.mjs",
+    "test": "node test-keys.mjs && node test-format.mjs && node test-protocol.mjs && node test-tool-relay.mjs && node test-guard-auth.mjs && node test-rate-limit.mjs && node test-http-helpers.mjs && node test-logger.mjs && node test-ui.mjs && node test-sessionauth.mjs && node test-runtime-settings.mjs && node test-updater.mjs && node test-relay-cancel.mjs && node test-relay-hook.mjs",
     "build:bundle": "esbuild boot.mjs --bundle --platform=node --format=cjs --target=node22 --packages=external --external:node:* --define:import.meta.url=__WA_IMPORT_META_URL__ --banner:js=\"const __WA_IMPORT_META_URL__=require('node:url').pathToFileURL(__filename).href;\" --outfile=src/_bundle.cjs",
     "build:exe": "npm run build:bundle && pkg src/_bundle.cjs --config package.json --targets node22-macos-arm64 --output dist/cursorapi-macos-arm64"
   },

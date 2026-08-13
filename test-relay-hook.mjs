@@ -14,6 +14,7 @@ export const mock = {
   createDelayMs: 0,   // Agent.create latency (launch-timeout test)
   fireTool: null,     // async fn called once by the first stream() pull
   finishAfterTool: false, // end the stream right after fireTool (a run that completes during a tool round-trip)
+  deadStream: false,  // upstream death: the stream never ends and cancel() is ineffective
   lastCustomTools: null,
   pendingExec: null,  // the last execute() promise, for the test to swallow
 };
@@ -40,6 +41,12 @@ export class FakeRun {
     return undefined;
   }
   async cancel() {
+    if (mock.deadStream) {
+      // Mirror a dead upstream: the cancel is recorded but cannot reach
+      // the stream — no abort flag, no status change.
+      mock.cancels.push(this);
+      return;
+    }
     // Mirror the SDK: cancel() ends the run; the stream loop observes the
     // abort and terminates, and wait() then reports "cancelled".
     this.cancelled = true;
@@ -48,6 +55,12 @@ export class FakeRun {
     mock.cancels.push(this);
   }
   async *stream() {
+    if (mock.deadStream) {
+      // The run never ends; only the test's flag (reset for the next test)
+      // can stop this generator.
+      while (mock.deadStream) await napped(20);
+      return;
+    }
     if (mock.fireTool && !this._fired) {
       this._fired = true;
       mock.fireTool();

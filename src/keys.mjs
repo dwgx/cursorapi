@@ -561,6 +561,41 @@ export function recordRequest(model, success, durationMs, accountId, tokens = {}
   scheduleLedgerDump();
 }
 
+// ── Recent requests ring (in-memory; /admin/requests source) ──
+// Newest 500 finished requests, one line per request. Like the aggregation
+// ledger it is memory-only — a restart loses it.
+
+const RECENT_REQUESTS_CAP = 500;
+const recentRequests = new Array(RECENT_REQUESTS_CAP);
+let recentWritten = 0;
+
+/**
+ * Append one finished request. The display name is resolved from the pool
+ * here (O(1) map lookup, no locks) and omitted when the account is gone;
+ * the error text is truncated to a brief line.
+ */
+export function pushRecentRequest(rec) {
+  const entry = { ...rec };
+  if (entry.accountId != null) {
+    const a = get(entry.accountId);
+    const name = a ? a.name || a.identity?.apiKeyName || "" : "";
+    if (name) entry.accountName = name;
+  }
+  if (entry.error != null) entry.error = String(entry.error).slice(0, 200);
+  recentRequests[recentWritten % RECENT_REQUESTS_CAP] = entry;
+  recentWritten += 1;
+}
+
+/** The n most recent requests, chronological. */
+export function listRecentRequests(n = RECENT_REQUESTS_CAP) {
+  const count = Math.min(n, recentWritten, RECENT_REQUESTS_CAP);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(recentRequests[(recentWritten - count + i) % RECENT_REQUESTS_CAP]);
+  }
+  return out;
+}
+
 /** GET /admin/stats response. */
 export function getStats() {
   const models = [...ledger.models.entries()]
@@ -812,11 +847,30 @@ export function get(id) {
 const GRACE_WINDOW_MS = 5 * 60 * 1000;
 const SLIDE_WINDOW_MS = 60 * 1000;
 
-/** Requests started in the last 60s (sliding window, pruned on read). */
+/**
+ * Requests started in the last 60s (sliding window). A head pointer plus
+ * lazy truncation replaces the old front-shift: every select used to walk
+ * the window and memmove-shift the array when entries expired (O(n) per
+ * boundary with long arrays). Here entries are only walked, and a window
+ * that fully expires truncates the array in place (O(1)); the stale prefix
+ * sits between head and 0 until the next full expiry, bounded by one
+ * window's worth of pushes. Semantics unchanged: the front is the oldest
+ * (pushes are chronological), and the count is live entries after head.
+ */
 function slidingLoad(a, now) {
   const t = a.requestTimes;
-  while (t.length && now - t[0] > SLIDE_WINDOW_MS) t.shift();
-  return t.length;
+  // The head pointer is only valid for the exact array it was advanced on:
+  // a hot reload may replace requestTimes with a longer array, and a stale
+  // head would silently drop the new prefix's oldest entries.
+  let h = a._rtArr === t ? (a._rtHead ?? 0) : 0;
+  while (h < t.length && now - t[h] > SLIDE_WINDOW_MS) h += 1;
+  if (h === t.length) {
+    t.length = 0; // everything expired: truncate and restart from the front
+    h = 0;
+  }
+  a._rtArr = t;
+  a._rtHead = h;
+  return t.length - h;
 }
 
 /**
@@ -909,9 +963,14 @@ export function select(exclude = []) {
   // Flush all sliding windows once up front so rankVector stays a pure read
   // — a comparator with side effects depends on sort implementation details.
   for (const a of candidates) slidingLoad(a, now);
-  candidates.sort((x, y) => vectorCompare(rankVector(x, now), rankVector(y, now)));
-  const top = rankVector(candidates[0], now);
-  const tier = candidates.filter((a) => vectorCompare(rankVector(a, now), top) === 0);
+  // Derive each candidate's 5-dim vector exactly once, then sort pure
+  // vectors: the old comparator re-derived rankVector on every comparison
+  // (O(n log n) allocations per select, the pool's dominant cost at scale).
+  // Same lexicographic order, same tie stability, same tier membership.
+  const ranked = candidates.map((a) => ({ a, v: rankVector(a, now) }));
+  ranked.sort((x, y) => vectorCompare(x.v, y.v));
+  const top = ranked[0].v;
+  const tier = ranked.filter((r) => vectorCompare(r.v, top) === 0).map((r) => r.a);
   const picked = tier[rrCursor++ % tier.length];
   picked.inflight += 1;
   picked.requestTimes.push(now);

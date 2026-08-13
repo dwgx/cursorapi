@@ -1,13 +1,30 @@
 # v0.1.0
 
-CursorAPI 首个版本：Cursor 号池网关。
+CursorAPI 洗刷后首个版本：把一池 Cursor API key 变成 OpenAI / Anthropic 双协议标准接口的网关。本版本在既有能力之上完成了管理面板体验增强与数据面并发加固。
 
-## 能力
+## 管理面板增强
 
-- OpenAI / Anthropic 双协议出口，35 个 Cursor 模型
-- 号池：多号负载均衡、错误分类、冷却、自动探活恢复
-- 工具中继：客户端工具调用原样回传（Claude Code / opencode 通用）
-- 管理面板：号池 / 账号 / 日志 / 模型 / 统计 / 设置 / 更新
-- 配置热更新 + OTA 更新（git/zip 双模式 + 崩溃自动回滚）
-- CURSOR_PROXY 代理支持（国内部署走代理）
-- Docker 镜像（GHCR）+ 单二进制（Linux / macOS / Windows）
+- **最近请求明细**：日志页新增「最近请求」表（时间 / 模型 / 账号 / 结果 / 耗时 / Token），点击行展开完整字段；数据来自新端点 `GET /admin/requests`（内存环形缓冲 500 条）
+- **统计图增强**：请求数趋势与成功率图加图例（色点 + 区间合计）、Y 轴从 0 起的取整刻度、X 轴智能时间标注、tooltip 增加成功率
+- **复制能力**：账号管理支持一键复制完整 Key（走既有 `/admin/accounts/:id/secret` 审计路径，明文不进页面）；接入信息页 Base URL / curl 示例 / 环境变量行全部可复制（clipboard 失败自动降级）
+- **操作便捷**：账号详情冷却倒计时（每秒递减）、账号表格关键词搜索（名字 / 邮箱 / 掩码 key / id）、按 ESC 退出登录（输入框内不触发）、日志流断线自动重连（指数退避 2s→30s）
+- **布局调整**：左下角「注销」改为「退出登录」，主题切换移到页面头部，左下角新增「设置」入口
+
+## 数据面并发加固
+
+- **入站限流**：`CURSOR_RATE_LIMIT_PER_MIN` 每-IP 60s 固定窗口（默认 0 = 关），超限 429 + Retry-After；`CURSOR_TRUSTED_PROXY` 信任代理配置——未配置时一律忽略 X-Forwarded-For，防止伪造头换桶绕过
+- **inflight 泄漏兜底**：上游流挂死（cancel 无效）时按死线强制释放号池预留，避免池子可用性静默衰减
+- **select 热路径优化**：选号 rank 向量预计算（比较器纯化）+ RPM 滑动窗口 head 指针（去掉 O(n) memmove）——200 号池选号 34.4µs → 20.6µs（约 40%）
+
+## 基建
+
+- 仓库历史洗刷：单 commit 重新初始化（旧历史保留在本地 `backup-pre-wipe` 分支）
+- 13 → 14 套测试（新增 test-rate-limit 15 项），全量 `npm test` 全绿
+
+## 能力（继承）
+
+- OpenAI / Anthropic 双协议出口，动态模型目录（约 35 个模型，60 分钟缓存，`[参数]` 后缀）
+- 号池：5 维选号（健康 / 宽限期 / 在飞 / RPM / 优先级）、失败分级冷却、半开恢复、`Cursor.me()` 探活、usage 耗尽持久化禁用
+- 工具中继：并行调用 80ms 合批、断流缓存补发、超时兜底
+- 配置三层热更新 + OTA 更新（git / zip 双模式 + 崩溃自动回滚守卫）
+- CURSOR_PROXY 国内代理支持；Docker 镜像（GHCR）+ 单二进制（Linux / macOS / Windows）

@@ -29,6 +29,15 @@ const isThrottled = (e) => {
 
 const idleMins = () => Math.round(config.turnIdleTimeoutMs / 60000);
 
+// Fallback ceiling for consume's stream loop. An upstream that dies without
+// ending its stream also swallows cancel() (same dead transport), so the
+// loop hangs and the account's in-flight reservation leaks for the rest of
+// the process's life. Twice the idle budget plus the per-call tool budget
+// (30 min at defaults) sits far above any legal turn — a normal turn ends
+// consume itself long before, so this is never the main path. Summed (not
+// maxed) so raising either budget scales the ceiling with it.
+const consumeDeadlineMs = () => 2 * config.turnIdleTimeoutMs + config.toolResultTimeoutMs;
+
 // SDK usage -> the four aggregate fields (missing fields count as 0).
 function usageFields(u) {
   return {
@@ -299,7 +308,17 @@ function settle(turn, model, startAt, acct) {
   const clean = !turn.error;
   if (!clean) pool.reportFailure(acct, new Error(turn.error));
   else pool.reportSuccess(acct, turn.usage);
-  pool.recordRequest(model, clean, Date.now() - startAt, acct.id, usageFields(turn.usage));
+  const ms = Date.now() - startAt;
+  pool.recordRequest(model, clean, ms, acct.id, usageFields(turn.usage));
+  pool.pushRecentRequest({
+    ts: new Date().toISOString(),
+    model,
+    accountId: acct.id,
+    success: clean,
+    ms,
+    tokens: usageFields(turn.usage),
+    ...(turn.error ? { error: turn.error } : {}),
+  });
 }
 
 // ── entry ──
@@ -375,7 +394,29 @@ export async function handle(adapter, body, res, { respondError }) {
   }
   // Reservation outlives the run by however long consume takes; the finally
   // covers client-disconnect and run-error paths that never report back.
-  void turn.consume(run).finally(() => pool.release(account));
+  // Guarded by a deadline: if the upstream dies without ending its stream
+  // (cancel() rides the same dead transport), consume hangs and the slot
+  // would leak forever. The deadline forces the finally to run — it only
+  // fires when nothing else could release the reservation; a normal turn
+  // settles consume first and the timer is cleared.
+  const consumeStarted = Date.now();
+  const consumeDone = turn.consume(run);
+  const consumeDeadline = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      log.error(
+        `run ${run.id} stream hung past ${Math.round(consumeDeadlineMs() / 60000)} min`
+        + ` (account ${account.name || account.id}, model ${flow.model},`
+        + ` after ${Math.round((Date.now() - consumeStarted) / 1000)}s); releasing the reservation`,
+      );
+      // Best-effort cancel so a hung consume loop gets a chance to unwind;
+      // the reservation release below is what actually unblocks the pool.
+      void cancelRun(run);
+      resolve();
+    }, consumeDeadlineMs());
+    timer.unref?.();
+    consumeDone.finally(() => clearTimeout(timer));
+  });
+  void Promise.race([consumeDone, consumeDeadline]).finally(() => pool.release(account));
   // Client-abandonment watch: cancels the run when tool calls go unanswered
   // while nothing is attached (see watchAbandoned).
   void watchAbandoned(turn, account);

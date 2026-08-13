@@ -596,6 +596,13 @@ table.compact tbody td{padding:6px 14px}
   border-radius:4px;transition:width .5s cubic-bezier(.16,1,.3,1)}
 .rank-num{width:56px;text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .rank-sr{width:52px;text-align:right;color:var(--text-dim);font-family:var(--mono)}
+/* 统计图例（图卡 header）：色点 + 名称 + 当前区间合计 */
+.chart-legend{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);
+  font-weight:500;white-space:nowrap}
+.cl-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.cl-val{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+/* 日志页最近请求表：空态/降级提示一行 */
+.req-msg{padding:18px 20px;font-size:12.5px;color:var(--text-dim)}
 
 /* ── 设置 ────────────────────────────────────────────── */
 .tabs{display:inline-flex;gap:4px;background:var(--surface-2);border:1px solid var(--border);
@@ -650,6 +657,7 @@ const I = {
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 9l5-5 5 5M12 4v12"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
   file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
   rows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
@@ -688,14 +696,15 @@ const BODY = `
   <div class="footer">
     <div class="footer-meta"><span id="foot">—</span><span class="fver" id="fver"></span><span class="fver" id="upd-badge" style="display:none;color:var(--accent);cursor:pointer" onclick="go('settings')" title="发现新版本，点击到设置页更新">▲ 升级</span></div>
     <div class="footer-actions">
-      <button class="btn btn-ghost footer-icon-btn" id="tb" onclick="toggleTheme()" title="切换主题"></button>
-      <button class="btn btn-ghost" onclick="logout()" title="注销当前会话">注销</button>
+      <button class="btn btn-ghost footer-icon-btn" onclick="go('settings')" title="设置">${I.gear}</button>
+      <button class="btn btn-ghost" onclick="logout()" title="退出登录">退出登录</button>
     </div>
   </div>
 </aside>
 <main class="main">
   <div class="page-header">
     <div><h1 class="page-title" id="ttl">概览</h1><div class="page-subtitle" id="sub">加载中…</div></div>
+    <button class="btn btn-ghost footer-icon-btn" id="tb" onclick="toggleTheme()" title="切换主题"></button>
   </div>
   <section class="panel active" data-v="pool" id="p-pool"><div id="view-pool"></div></section>
   <section class="panel" data-v="accounts" id="p-accounts"><div id="view-accounts"></div></section>
@@ -826,6 +835,9 @@ var PAGE={pool:1, accounts:1}, PAGE_SIZE=50;
 var cfgEff=[];
 try{ var _ps=Number(localStorage.getItem("acc_page_size")); if(_ps>0) PAGE_SIZE=_ps; }catch(_){}
 var logRing=[], logAbort=null, logStarted=false, logTimer=null;
+// 最近请求表：reqData=null 未加载/失败；reqAt 上次**完成**时间（SSE 顺带刷新节流）；
+// reqBusy 防止并发 in-flight；reqFailAt 失败后 10s 退避，避免故障时帧率即请求率
+var reqData=null, reqAt=0, reqExp={}, reqBusy=false, reqFailAt=0;
 var statsLoaded=false, cfgLoaded=false, updLoaded=false, statsAt=0;
 var pageHidden=false;
 // SIG：任何结构性变化（勾选/展开/密度/筛选）都自增，表格签名跟着变 → 强制重绘；
@@ -848,8 +860,14 @@ function go(v){
   for(var j=0;j<panels.length;j++) panels[j].className = panels[j].dataset.v===v ? "panel active" : "panel";
   $("ttl").textContent = VIEWS[v];
   if(v==="models" && !models) loadModels();
-  if(v==="logs"){ if(!logStarted){ logStarted=true; startLogs(); } }
-  else stopLogs();
+  if(v==="logs"){ 
+    if(!logStarted){ logStarted=true; startLogs(); }
+    // 断流后切走再切回：logStarted 闩锁已开但没有活流（stopLogs 清了
+    // abort），这里重新拉起；有重试定时器在跑就让定时器接手，不抢。
+    else if(!logAbort && !logRetryTimer){ startLogs(); }
+    startReqTicker();
+  }
+  else { stopLogs(); stopReqTicker(); }
   if(v==="stats" && !statsLoaded) loadStats();
   if(v==="settings" && !cfgLoaded) loadSettings();
   render();
@@ -987,7 +1005,7 @@ function detailCard(a){
   ];
   if(a.disabledReason) rows.push(["禁用原因",esc(a.disabledReason)]);
   if(a.autoRecoverable!=null) rows.push(["自动恢复",a.autoRecoverable?"会":"不会"]);
-  if(a.cooldownUntil) rows.push(["冷却到",esc(String(a.cooldownUntil).slice(0,19).replace("T"," "))]);
+  if(a.cooldownUntil) rows.push(["冷却",coolCdHtml(a.cooldownUntil)]);
   if(a.email) rows.push(["邮箱",esc(a.email)]);
   if(a.login) rows.push(["登录邮箱",esc(a.login)]);
   if(a.keyCreatedAt) rows.push(["Key 创建",esc(String(a.keyCreatedAt).slice(0,10))]);
@@ -1001,6 +1019,21 @@ function detailCard(a){
     out+='<div class="kv"><div class="kv-k">'+rows[i][0]+'</div><div class="kv-v">'+(rows[i][1]||"—")+'</div></div>';
   }
   return out+'</div>';
+}
+
+// 冷却倒计时单元格：渲染时算一次，之后 coolTick() 每秒刷新（只在账号页跑）。
+// 悬停 title 保留绝对时间兜底。剩余 >1h 显示 H:MM:SS，否则 MM:SS。
+function coolFmt(ms){
+  var s=Math.max(0,Math.floor(ms/1000));
+  var h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60;
+  if(h>0) return h+":"+pad2(m)+":"+pad2(ss);
+  return pad2(m)+":"+pad2(ss);
+}
+function coolCdHtml(cu){
+  var rem=0, t=new Date(cu).getTime();
+  if(!isNaN(t)) rem=Math.max(0,t-Date.now());
+  return '<span class="cool-cd" data-cu="'+esc(String(cu))+'" title="冷却到 '+esc(String(cu).slice(0,19).replace("T"," "))+'">'
+    + (rem>0 ? "冷却中 剩余 "+coolFmt(rem) : "冷却结束") + '</span>';
 }
 
 // ── Ctrl/Shift 多选（windsurf 勾选交互）────────────────
@@ -1068,6 +1101,7 @@ function buildRows(rows){
          + '<input type="checkbox"'+(a.disabled?"":" checked")+' onchange="toggle(\\''+a.id+'\\',this.checked)">'
          + '<span class="switch-slider"></span></label>'
        + '<button class="btn btn-icon btn-ghost" title="探活" onclick="probe(\\''+a.id+'\\')">'+ICO.refresh+'</button>'
+       + '<button class="btn btn-icon btn-ghost" title="复制完整 Key" onclick="copyKey(\\''+a.id+'\\')">'+ICO.copy+'</button>'
        + '<button class="btn btn-icon btn-ghost" title="改名 / 改优先级" onclick="editOpen(\\''+a.id+'\\')">'+ICO.edit+'</button>'
        + '<button class="btn btn-icon btn-ghost danger" title="删除" onclick="del(\\''+a.id+'\\')">'+ICO.trash+'</button>'
        + '</div></td></tr>'
@@ -1252,11 +1286,11 @@ function renderPoolTable(){
     : emptyHtml("池子是空的","现在所有请求都会返回 503。点右上角「添加账号」把 Cursor API Key 加进来。");
 }
 
-// ── 账号管理页（独立面板：筛选 + 密度 + 批量）──────────
+// ── 账号管理页（独立面板：筛选 + 搜索 + 密度 + 批量）──
 function filteredAccounts(){
   if(!data) return [];
-  var st=$("af-st"), pr=$("af-pr");
-  var sv=st?st.value:"", pv=pr?pr.value:"";
+  var st=$("af-st"), pr=$("af-pr"), q=$("af-q");
+  var sv=st?st.value:"", pv=pr?pr.value:"", qv=(q?q.value:"").toLowerCase().trim();
   return data.accounts.filter(function(a){
     if(sv==="ok" && a.disabled) return false;
     if(sv==="disabled" && !a.disabled) return false;
@@ -1264,6 +1298,10 @@ function filteredAccounts(){
       var p=a.priority||0;
       if(pv==="4"){ if(p<4) return false; }
       else if(p!==Number(pv)) return false;
+    }
+    if(qv){
+      var hay=(a.name||"")+" "+(a.email||"")+" "+(a.login||"")+" "+(a.maskedKey||"")+" "+(a.id||"");
+      if(hay.toLowerCase().indexOf(qv)===-1) return false;
     }
     return true;
   });
@@ -1284,6 +1322,7 @@ function renderAccounts(){
      + '<div class="field"><label class="field-label">优先级</label>'
        + '<select id="af-pr" class="select" onchange="afilter()">'
          + '<option value="">全部</option><option value="0">P0</option><option value="1">P1</option><option value="2">P2</option><option value="3">P3</option><option value="4">P4+</option></select></div>'
+     + '<div class="field grow"><label class="field-label">搜索</label><input id="af-q" class="input" placeholder="名字 / 邮箱 / Key / ID…" onkeyup="onAcctSearch()"></div>'
      + '<div class="field"><label class="field-label">密度</label>'
        + '<button class="btn'+(dens?' on':"")+'" id="densb" onclick="toggleDensity()">'+ICO.rows+(dens?" 紧凑":" 舒适")+'</button></div>'
      + '<div class="spacer"></div>'
@@ -1298,6 +1337,12 @@ function renderAccounts(){
   renderAccountsTable();
 }
 function afilter(){ SIG++; renderAccountsTable(); }
+// 搜索防抖 200ms（同 onLogSearch 模式），防抖后自增 SIG 强制重绘
+var acctTimer=null;
+function onAcctSearch(){
+  if(acctTimer) clearTimeout(acctTimer);
+  acctTimer=setTimeout(function(){ acctTimer=null; SIG++; renderAccountsTable(); },200);
+}
 // 点击掩码 Key 单元格 → 复制完整 Key（管理面单号揭示端点）。
 function copyKey(id){
   api("accounts/"+id+"/secret").then(function(r){
@@ -1322,6 +1367,22 @@ function fallbackCopy(text, done){
     if(ok){ done(); return; }
   }catch(_){}
   toast("复制失败（环境限制）","info");
+}
+// 通用复制（接入信息页等）：文本存 COPY_TEXTS 数组，按钮只带下标，
+// 避免把含引号/换行的文本序列化进 onclick 字符串。
+var COPY_TEXTS=[];
+function copyText(i){
+  var t=COPY_TEXTS[i];
+  if(t==null){ toast("没有可复制的内容","bad"); return; }
+  var done=function(){ toast("已复制到剪贴板","ok"); };
+  try{
+    if(navigator && navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(done, function(){ fallbackCopy(t, done); });
+    } else { fallbackCopy(t, done); }
+  }catch(_){ fallbackCopy(t, done); }
+}
+function copyBtn(i){
+  return '<button class="btn btn-icon btn-ghost" title="复制" onclick="copyText('+i+')">'+ICO.copy+'</button>';
 }function renderAccountsTable(){
   var box=$("acct-table"); if(!box) return;
   var rows=filteredAccounts();
@@ -1383,6 +1444,14 @@ function toggleExp(id){
 
 // ── 日志：fetch + ReadableStream 手动切帧（不用 EventSource）──
 // 认证走 cookie，fetch 天然带上去；流失败（后端未就绪）显示占位，不崩。
+// 断流自动重连：指数退避 2s→30s 封顶，只在日志页可见且非手动停止时重试。
+var logRetryTimer=null, logRetryDelay=0;
+function scheduleLogRetry(){
+  if(view!=="logs" || logRetryTimer) return;
+  logRetryDelay = logRetryDelay ? Math.min(logRetryDelay*2, 30000) : 2000;
+  var st=$("logst"); if(st) st.textContent="断线重连中…（"+Math.round(logRetryDelay/1000)+"s 后重试）";
+  logRetryTimer=setTimeout(function(){ logRetryTimer=null; startLogs(); }, logRetryDelay);
+}
 function startLogs(){
   if(logAbort) return;
   var st=$("logst"); if(st) st.textContent="连接中…";
@@ -1392,6 +1461,7 @@ function startLogs(){
   fetch("/admin/logs", ac?{signal:ac.signal}:undefined)
    .then(function(res){
      if(!res || !res.ok || !res.body || !res.body.getReader) throw new Error("nostream");
+     logRetryDelay=0;                            // 连上即重置退避
      var rd=res.body.getReader();
      var dec=(typeof TextDecoder!=="undefined")?new TextDecoder():null;
      var buf="";
@@ -1421,19 +1491,29 @@ function startLogs(){
      return pump();
    })
    .catch(function(err){
-     logAbort=null;
-     if(st) st.textContent = (err && err.message==="nostream")
-       ? "日志流不可用（后端未实现 /admin/logs？）" : "日志流断开";
+     // 只清自己的 controller：手动重连时旧流的 AbortError 异步到达，
+     // 无条件清会把新流的 controller 丢掉（切页签后就无法停止它）。
+     if(logAbort===ac) logAbort=null;
+     var nostream = err && err.message==="nostream";
+     // 手动停止（stopLogs abort）不算断流 —— 切页签/点重连时旧流的
+     // 取消是异步到的，不区分的话会误排一次重试并盖掉「连接中」文案
+     var manual = err && (err.name==="AbortError" || err.code==="ABORT_ERR");
+     if(st) st.textContent = nostream
+       ? "日志流不可用（后端未实现 /admin/logs？）"
+       : (manual ? "日志已停止" : "日志流断开");
      var b=$("logc");
      if(b && !b.children.length) b.innerHTML='<div class="panel-empty"><div class="pe-sub">实时日志不可用 —— 后端未实现 /admin/logs 或连接失败。可点「重连」或改用右侧导出。</div></div>';
+     if(!nostream && !manual) scheduleLogRetry();
    });
 }
 function stopLogs(){
+  if(logRetryTimer){ if(typeof clearTimeout!=="undefined") clearTimeout(logRetryTimer); logRetryTimer=null; }
   if(logAbort){ try{ logAbort.abort(); }catch(_){} logAbort=null; }
 }
 function reconnectLogs(){ stopLogs(); startLogs(); }
 
 function pushLog(e){
+  maybeRefreshRequests();
   logRing.push(e);
   if(logRing.length>500) logRing.shift();
   var c=$("logc"); if(!c) return;
@@ -1515,6 +1595,113 @@ function logLvOptions(){
      + '<span class="cs-chevron">▾</span></button>'
    + '<div class="cs-menu" id="csm-loglv" data-cs="1" style="display:none">'+opts+'</div></div>';
 }
+// ── 最近请求：明细表（GET /admin/requests，日志页与日志流之间）──
+// 数据源在后端是最近 500 条环形缓冲，这里拉 200 条。失败静默降级，
+// 只显示一行占位；SSE 日志帧到达时顺带刷新（3 秒节流，完成时计时）。
+function loadRequests(){
+  if(reqBusy) return;                       // 任何时刻最多一个 in-flight
+  reqBusy=true;
+  fetch("/admin/requests?limit=200").then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return r.text();
+  }).then(function(t){
+    var d=null; try{ d=JSON.parse(t); }catch(_){}
+    reqData=(d && Array.isArray(d.items)) ? d.items : null;
+    reqAt=Date.now();                       // 完成时更新，不是开始时
+    reqFailAt=0;
+    reqBusy=false;
+    renderReqTable();
+  }).catch(function(){
+    reqAt=Date.now();
+    reqFailAt=Date.now();
+    reqData=null;
+    reqBusy=false;
+    renderReqTable();
+  });
+}
+function maybeRefreshRequests(){
+  if(reqBusy) return;
+  if(Date.now()-reqFailAt<10000) return;    // 失败后退避 10s，不逐帧打
+  if(!reqData || Date.now()-reqAt>3000) loadRequests();
+}
+function reqTime(ts){
+  if(ts==null) return "—";
+  try{
+    if(typeof ts==="number" && ts>1e11) return new Date(ts).toLocaleTimeString();
+    var d=new Date(ts);
+    if(!isNaN(d.getTime())) return d.toLocaleTimeString();
+  }catch(_){}
+  var s=String(ts);
+  return s.slice(11,19)||s;
+}
+function reqDetail(it){
+  var rows=[
+    ["时间",esc(it.ts!=null?it.ts:"—")],
+    ["模型",esc(it.model||"—")],
+    ["账号 ID",esc(it.accountId||"—")],
+    ["账号名",esc(it.accountName||"—")],
+    ["结果",it.success?"成功":"失败"],
+    ["耗时",it.ms!=null?(it.ms+" ms"):"—"],
+  ];
+  var tk=it.tokens||{};
+  rows.push(["Token 输入",tk.input!=null?String(tk.input):"—"]);
+  rows.push(["Token 输出",tk.output!=null?String(tk.output):"—"]);
+  rows.push(["Token 缓存读",tk.cacheRead!=null?String(tk.cacheRead):"—"]);
+  rows.push(["Token 缓存写",tk.cacheWrite!=null?String(tk.cacheWrite):"—"]);
+  if(it.error!=null) rows.push(["错误",esc(String(it.error))]);
+  var out='<div class="detail-card">';
+  for(var i=0;i<rows.length;i++){
+    out+='<div class="kv"><div class="kv-k">'+rows[i][0]+'</div><div class="kv-v">'+(rows[i][1]||"—")+'</div></div>';
+  }
+  return out+'</div>';
+}
+// 展开态按 ts+accountId+model 做 key（数组下标会在数据刷新后漂移）
+function reqKey(it){ return String(it.ts!=null?it.ts:"")+"|"+(it.accountId!=null?String(it.accountId):"")+"|"+(it.model||""); }
+function reqRowHtml(it, i){
+  var acct=it.accountName
+    || (it.accountId!=null ? String(it.accountId).slice(0,8) : "—");
+  var res=it.success
+    ? '<span class="badge success">成功</span>'
+    : '<span class="badge error" title="'+esc(it.error||"")+'">失败</span>';
+  var tk=it.tokens;
+  var toks=tk
+    ? '<span class="num">'+fmt(tk.input||0)+'</span><span class="dim" title="输入/输出">/</span><span class="num">'+fmt(tk.output||0)+'</span>'
+    : '<span class="dim">—</span>';
+  var open=reqExp[reqKey(it)]===true;
+  return '<tr class="selectable" onclick="reqRow('+i+')">'
+   + '<td class="mono dim">'+esc(reqTime(it.ts))+'</td>'
+   + '<td class="mono">'+esc(it.model||"—")+'</td>'
+   + '<td>'+esc(acct)+'</td>'
+   + '<td>'+res+'</td>'
+   + '<td class="num">'+(it.ms!=null?it.ms:"—")+'</td>'
+   + '<td>'+toks+'</td></tr>'
+   + (open ? '<tr class="detail-row"><td colspan="6"><div class="detail-wrap">'+reqDetail(it)+'</div></td></tr>' : "");
+}
+function reqRow(i){
+  var it=reqData?reqData[i]:null;
+  if(!it) return;
+  var k=reqKey(it);
+  if(reqExp[k]) delete reqExp[k]; else reqExp[k]=true;
+  renderReqTable();
+}
+function renderReqTable(){
+  var box=$("req-table"); if(!box) return;
+  if(reqData===null){
+    box.innerHTML=reqAt>0
+      ? '<div class="req-msg">请求明细暂不可用</div>'
+      : '<div class="req-msg">加载中…</div>';
+    return;
+  }
+  if(!reqData.length){
+    box.innerHTML='<div class="req-msg">暂无请求 —— 有请求进来后会在这里显示。</div>';
+    return;
+  }
+  var h='<div class="table-wrap"><table><thead><tr>'
+    + '<th>时间</th><th>模型</th><th>账号</th><th>结果</th><th>耗时</th><th>Token</th>'
+    + '</tr></thead><tbody>';
+  for(var i=0;i<reqData.length;i++) h+=reqRowHtml(reqData[i], i);
+  box.innerHTML=h+'</tbody></table></div>';
+}
 function renderLogsView(){
   $("sub").textContent = "实时日志 · 500 条环形缓冲";
   $("view-logs").innerHTML =
@@ -1528,9 +1715,14 @@ function renderLogsView(){
      + '<button class="btn" onclick="exportLogs(\\'jsonl\\')">'+ICO.down+'jsonl</button>'
      + '<button class="btn" onclick="exportLogs(\\'txt\\')">'+ICO.down+'txt</button>'
    + '</div></div>'
+   + '<section class="section"><div class="section-header">'
+     + '<div><div class="section-title">最近请求</div>'
+        + '<div class="section-desc">一个请求一行 · 最近 200 条 · 数据来自 /admin/requests</div></div></div>'
+     + '<div class="section-body tight" id="req-table"></div></section>'
    + '<div class="log-meta"><span id="logst">未连接</span><span>最多保留 500 条</span></div>'
    + '<div class="log-container" id="logc"></div>';
   renderLogs();
+  maybeRefreshRequests();
 }
 
 // ── 模型：按厂商分组（前端静态映射，图标内嵌）─────────
@@ -1798,6 +1990,10 @@ function renderStats(){
   var sr=req>0?(suc/req*100):null;
   var avg=t.avgMs!=null?t.avgMs:modelAvgMs();
   var tok=t.tokens||{};
+  // 图例：当前区间（与图表同一窗口）的合计值
+  var series=seriesInRange()||[];
+  var legReq=seriesSum(series,"requests"), legSuc=seriesSum(series,"success");
+  var legSr=legReq>0?(Math.round(legSuc/legReq*1000)/10)+"%":"—";
   TIP=[];
   // 错误卡明细：错误率 + 最近错误最多的 3 个模型
   var eTop=(statsData.models||[]).slice()
@@ -1832,9 +2028,12 @@ function renderStats(){
        + tokBlock("缓存读",tok.cacheRead)+tokBlock("缓存写",tok.cacheWrite)
      + '</div></div></div>'
    + '<div class="chart-grid">'
-     + '<div class="card chart-box"><div class="card-header"><div class="card-title">请求数趋势</div><div class="btn-group">'
-       + rangeBtns() + '</div></div><canvas id="sc-req" height="240"></canvas></div>'
-     + '<div class="card chart-box"><div class="card-header"><div class="card-title">成功率</div></div><canvas id="sc-suc" height="240"></canvas></div>'
+      + '<div class="card chart-box"><div class="card-header"><div class="card-title">请求数趋势</div><div class="btn-group">'
+        + legendHtml(cssVar("--chart-req","#4c9aff"), "请求", fmt(legReq), "lr-req")
+        + rangeBtns() + '</div></div><canvas id="sc-req" height="240"></canvas></div>'
+      + '<div class="card chart-box"><div class="card-header"><div class="card-title">成功率</div>'
+        + legendHtml(cssVar("--chart-succ","#4a9d6a"), "成功率", legSr, "lr-suc")
+        + '</div><canvas id="sc-suc" height="240"></canvas></div>'
    + '</div>'
    + '<section class="section"><div class="section-header">'
      + '<div><div class="section-title">模型排行</div><div class="section-desc">按请求数降序 · 悬停看精确数值</div></div></div>'
@@ -1924,6 +2123,17 @@ function drawCharts(){
   var s=seriesInRange();
   drawLine("sc-req", s, "req");
   drawLine("sc-suc", s, "suc");
+  updateLegend(s);
+}
+// 图例合计值与图表同一窗口（共用 seriesInRange 的结果）：
+// 初始渲染由 renderStats 内嵌，区间切换后由这里同步重算
+function updateLegend(s){
+  var e1=$("lr-req"), e2=$("lr-suc");
+  if(!e1 && !e2) return;
+  if(!s){ if(e1) e1.textContent="—"; if(e2) e2.textContent="—"; return; }
+  var rq=seriesSum(s,"requests"), su=seriesSum(s,"success");
+  if(e1) e1.textContent=fmt(rq);
+  if(e2) e2.textContent=rq>0?(Math.round(su/rq*1000)/10)+"%":"—";
 }
 function cssVar(name, fb){
   try{
@@ -1946,6 +2156,28 @@ function fmtNum(n){
   if(Math.abs(n)>=100) return String(Math.round(n));
   return String(Math.round(n*10)/10);
 }
+// 统计图例：色点 + 名称 + 当前区间合计值（与 drawLine 的取色一致）。
+// id 让 drawCharts 在区间切换后能直接改 .cl-val 的文本（chartRange 重画同步）。
+function legendHtml(color, label, val, id){
+  return '<span class="chart-legend"><span class="cl-dot" style="background:'+color+'"></span>'
+    + esc(label)+'<span class="cl-val"'+(id?' id="'+id+'"':"")+'>'+esc(val)+'</span></span>';
+}
+function seriesSum(buckets, key){
+  var n=0;
+  for(var i=0;i<buckets.length;i++) n+=(buckets[i][key]||0);
+  return n;
+}
+// Y 轴顶值取整到 1/2/5×10^n，保证刻度是整数
+function niceMax(v){
+  if(!(v>0)) return 1;
+  var p=Math.pow(10,Math.floor(Math.log(v)/Math.LN10));
+  var m=v/p;
+  if(m<=1) return p;
+  if(m<=2) return 2*p;
+  if(m<=5) return 5*p;
+  return 10*p;
+}
+function pad2(n){ return (n<10?"0":"")+n; }
 // 折线 + 渐变填充 + 网格 + DPR 适配，颜色从 CSS 变量取（主题切换后重画）
 function drawLine(id, buckets, mode){
   var cv=$(id);
@@ -1985,24 +2217,48 @@ function drawLine(id, buckets, mode){
       : (b.requests||0));
   }
   var maxV=Math.max.apply(null,vals), minV=Math.min.apply(null,vals);
-  if(mode==="suc") maxV=Math.max(maxV,100);
-  if(maxV===minV){ maxV=maxV+1; if(minV>0) minV=0; }
+  if(mode==="suc"){ minV=0; maxV=100; }            // 成功率固定 0-100
+  else { minV=0; maxV=niceMax(maxV); }             // 请求数从 0 起，顶值 nice 取整
+  if(!(maxV>minV)) maxV=minV+1;
+  // 刻度：尽量 5 条；maxV 不能被 4 整除（如 50）时退到 0/½/1 三条，刻度保持整数
   var gridN=4;
+  var tick=[];
+  for(var g=0;g<=gridN;g++) tick.push(minV+(maxV-minV)*g/gridN);
+  var frac=false;
+  for(var g2=0;g2<tick.length;g2++) if(Math.abs(tick[g2]-Math.round(tick[g2]))>1e-6) frac=true;
+  if(frac && gridN>2){
+    gridN=2;
+    tick=[];
+    for(var g3=0;g3<=gridN;g3++) tick.push(minV+(maxV-minV)*g3/gridN);
+  }
   for(var g=0;g<=gridN;g++){
     var gy=pad.t+ch-(g/gridN)*ch;
     ctx.beginPath(); ctx.moveTo(pad.l,gy); ctx.lineTo(pad.l+cw,gy); ctx.stroke();
-    ctx.fillText(fmtNum(minV+(maxV-minV)*g/gridN),6,gy+4);
+    ctx.fillText(fmtNum(tick[g]),6,gy+4);
   }
-  var xLabelAt=function(idx){
-    var b=buckets[idx];
+  // X 轴时间标签：最多 6 个；跨度 ≥48h 显示 M/D，否则 HH:00
+  var spanH=buckets.length;
+  var stepX=Math.max(1,Math.ceil((spanH-1)/5));
+  var xTxt=function(b){
     var tv=b.t!=null?b.t:(b.ts!=null?b.ts:(b.hour!=null?b.hour:""));
-    if(typeof tv==="number" && tv>1e12){ try{ return new Date(tv).toTimeString().slice(0,5); }catch(_){ return String(tv); } }
-    return String(tv).slice(11,16)||String(tv).slice(0,10);
+    try{
+      if(typeof tv==="number" && tv>1e11){
+        var dt=new Date(tv);
+        if(spanH>=48) return (dt.getMonth()+1)+"/"+dt.getDate();
+        return pad2(dt.getHours())+":00";
+      }
+      var s=String(tv);
+      if(spanH>=48) return s.slice(5,10).replace("-","/")||s.slice(0,10);
+      return s.slice(11,16)||s.slice(0,5)||s;
+    }catch(_){ return String(tv); }
   };
-  var xs=[0,Math.floor((buckets.length-1)/2),buckets.length-1];
-  for(var xi=0;xi<xs.length;xi++){
-    var lx=pad.l+(buckets.length>1?xs[xi]/(buckets.length-1)*cw:cw/2);
-    ctx.fillText(xLabelAt(xs[xi]),lx-14,H-10);
+  for(var xi=0;xi<spanH;xi+=stepX){
+    var lx=pad.l+(spanH>1?xi/(spanH-1)*cw:cw/2);
+    ctx.fillText(xTxt(buckets[xi]),lx-14,H-10);
+  }
+  var lastIdx=spanH-1;
+  if(spanH>1 && lastIdx%stepX!==0){
+    ctx.fillText(xTxt(buckets[lastIdx]),pad.l+cw-14,H-10);
   }
   var step=buckets.length>1?cw/(buckets.length-1):0;
   var px=function(j){ return pad.l+step*j; };
@@ -2036,7 +2292,8 @@ function drawLine(id, buckets, mode){
       else if(typeof tv==="string"){ lbl=tv.replace("T"," ").slice(0,16); }
       var detail=(mode==="suc")
         ? "成功 "+fmt(b.success||0)+" / 失败 "+fmt(b.errors||0)+" / 请求 "+fmt(b.requests||0)
-        : "请求 "+fmt(b.requests||0)+" · 成功 "+fmt(b.success||0)+" · 失败 "+fmt(b.errors||0);
+        : "请求 "+fmt(b.requests||0)+" · 成功 "+fmt(b.success||0)+" · 失败 "+fmt(b.errors||0)
+          + " · 成功率 "+(b.requests?(Math.round((b.success||0)/b.requests*1000)/10+"%"):"—");
       tip.innerHTML="<b>"+esc(lbl)+"</b><br>"+esc(detail);
       tip.style.display="block";
       tip.style.left=Math.round(mx+8)+"px";
@@ -2402,21 +2659,39 @@ async function statusNow(){
 function renderConn(){
   $("sub").textContent="双协议接入：Anthropic /v1 与 OpenAI /v1";
   var base = location.origin;
+  // 可复制文本集中放 COPY_TEXTS，按钮只带下标（避免把引号/换行塞进 onclick）
+  var cop=[];
+  var pushCopy=function(t){ cop.push(t); return cop.length-1; };
+  var curlA='curl '+base+'/v1/messages\\n'
+    +'  -H "x-api-key: $CURSOR_CLIENT_KEY"\\n'
+    +'  -H "content-type: application/json"\\n'
+    +'  -d {"model":"claude-opus-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}';
+  var curlO='curl '+base+'/v1/chat/completions\\n'
+    +'  -H "Authorization: Bearer $CURSOR_CLIENT_KEY"\\n'
+    +'  -H "content-type: application/json"\\n'
+    +'  -d {"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}';
+  var envCC='ANTHROPIC_BASE_URL='+base+'/v1 ANTHROPIC_AUTH_TOKEN=$CURSOR_CLIENT_KEY';
+  var iBA=pushCopy(base+"/v1");
+  var iCA=pushCopy(curlA);
+  var iBO=pushCopy(base+"/v1");
+  var iCO=pushCopy(curlO);
+  var iEC=pushCopy(envCC);
+  COPY_TEXTS=cop;
   $("view-conn").innerHTML=\'<div class="doc">\'
    + \'<div class="conn-grid">\'
-   + \'<div class="card"><div class="card-header"><div class="card-title">Anthropic 协议（/v1/messages）</div><span class="badge success">Claude Code / Anthropic SDK</span></div><div class="card-body">\'
-   + \'<div class="conn-row"><span class="conn-k">Base URL</span><code>\'+esc(base)+\'/v1</code></div>\'
+   + \'<div class="card"><div class="card-header"><div class="card-title">Anthropic 协议（/v1/messages）</div><span class="btn-group"><span class="badge success">Claude Code / Anthropic SDK</span>\'+copyBtn(iCA)+\'</span></div><div class="card-body">\'
+   + \'<div class="conn-row"><span class="conn-k">Base URL</span><code>\'+esc(base)+\'/v1</code>\'+copyBtn(iBA)+\'</div>\'
    + \'<div class="conn-row"><span class="conn-k">认证</span><code>x-api-key: &lt;CURSOR_CLIENT_KEYS 任一把&gt;</code></div>\'
    + \'<pre><span class="c"># curl 最小示例</span>\\n\'
    + \'curl \'+esc(base)+\'/v1/messages\\n\'
    + \'  -H "x-api-key: $CURSOR_CLIENT_KEY"\\n\'
    + \'  -H "content-type: application/json"\\n\'
    + \'  -d {"model":"claude-opus-5","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}</pre>\'
-   + \'<div class="conn-row"><span class="conn-k">Claude Code</span><code>ANTHROPIC_BASE_URL=\'+esc(base)+\'/v1 &nbsp; ANTHROPIC_AUTH_TOKEN=$CURSOR_CLIENT_KEY</code></div>\'
+   + \'<div class="conn-row"><span class="conn-k">Claude Code</span><code>ANTHROPIC_BASE_URL=\'+esc(base)+\'/v1 &nbsp; ANTHROPIC_AUTH_TOKEN=$CURSOR_CLIENT_KEY</code>\'+copyBtn(iEC)+\'</div>\'
    + \'<div class="field-hint">流式：Anthropic 事件序列（message_start → ping → content_block_* → message_delta → message_stop）。</div>\'
    + \'</div></div>\'
-   + \'<div class="card"><div class="card-header"><div class="card-title">OpenAI 协议（/v1/chat/completions）</div><span class="badge success">OpenAI SDK / opencode</span></div><div class="card-body">\'
-   + \'<div class="conn-row"><span class="conn-k">Base URL</span><code>\'+esc(base)+\'/v1</code></div>\'
+   + \'<div class="card"><div class="card-header"><div class="card-title">OpenAI 协议（/v1/chat/completions）</div><span class="btn-group"><span class="badge success">OpenAI SDK / opencode</span>\'+copyBtn(iCO)+\'</span></div><div class="card-body">\'
+   + \'<div class="conn-row"><span class="conn-k">Base URL</span><code>\'+esc(base)+\'/v1</code>\'+copyBtn(iBO)+\'</div>\'
    + \'<div class="conn-row"><span class="conn-k">认证</span><code>Authorization: Bearer &lt;CURSOR_CLIENT_KEYS 任一把&gt;</code></div>\'
    + \'<pre><span class="c"># curl 最小示例</span>\\n\'
    + \'curl \'+esc(base)+\'/v1/chat/completions\\n\'
@@ -2621,6 +2896,52 @@ setInterval(function(){ if(pageHidden) return; if((view==="pool"||view==="accoun
 setInterval(function(){ if(pageHidden) return; if(view==="stats" && statsLoaded && !busy) loadStats(); }, 30000);
 // 设置页信息条：运行时长每秒会变，5 秒重刷一次（配置表单不重绘，只刷这条）
 setInterval(function(){ if(view==="settings" && cfgLoaded){ var el=$("cfg-info"); if(el) renderCfgInfo(); } }, 5000);
+
+// 最近请求表独立刷新：日志流断/不可用时不至于让表格停在进入时的数据。
+// 10s tick 与日志帧触发的 maybeRefreshRequests 共用 reqBusy/reqAt 守卫。
+var reqTicker=null;
+function startReqTicker(){
+  if(reqTicker) return;
+  if(typeof setInterval==="undefined") return;
+  reqTicker=setInterval(function(){ maybeRefreshRequests(); }, 10000);
+}
+function stopReqTicker(){
+  if(reqTicker){ if(typeof clearInterval!=="undefined") clearInterval(reqTicker); reqTicker=null; }
+}
+
+// ESC 退出登录：无弹窗打开时按 ESC → 确认后退出。弹窗开着时不抢，
+// 先让用户处理弹窗。函数体独立出来，测试沙箱里也能直接调用。
+function onKeyDown(ev){
+  try{
+    var e=ev||(typeof window!=="undefined"?window.event:null)||{};
+    var key=e.key||e.keyCode||"";
+    if(key!=="Escape" && key!==27 && key!=="Esc") return;
+    // 输入框/文本域里的 ESC 是清输入，不是退出登录
+    var t=e.target||null;
+    if(t && (t.tagName==="INPUT" || t.tagName==="TEXTAREA" || t.isContentEditable)) return;
+    if($("modal") && $("modal").innerHTML) return;
+    askConfirm("确认退出登录？", function(){ logout(); }, true);
+  }catch(_){}
+}
+if(document.addEventListener) document.addEventListener("keydown", onKeyDown);
+
+// 冷却倒计时：账号详情展开行里的剩余时间每秒刷新。单个全局 interval
+// 带可见性守卫（只在账号页 + 页面可见时干活），不随视图切换反复建/拆。
+function coolTick(){
+  if(typeof document==="undefined" || !document.getElementsByClassName) return;
+  var els=document.getElementsByClassName("cool-cd");
+  if(!els || !els.length) return;
+  var now=Date.now();
+  for(var i=0;i<els.length;i++){
+    var el=els[i], cu=el.getAttribute ? el.getAttribute("data-cu") : null;
+    if(!cu) continue;
+    var t=new Date(cu).getTime();
+    if(isNaN(t)) continue;
+    var rem=Math.max(0,t-now);
+    el.textContent = rem>0 ? "冷却中 剩余 "+coolFmt(rem) : "冷却结束";
+  }
+}
+setInterval(function(){ if(view==="accounts" && !pageHidden) coolTick(); }, 1000);
 
 // 侧栏版本号：后端有 /admin/update/check 就从 current 拿；没有就静默。
 // 顺带把结果存进 upd，设置页的版本信息条跟它共用一份数据。
