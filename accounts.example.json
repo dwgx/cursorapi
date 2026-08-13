@@ -1,0 +1,18 @@
+[
+  {
+    "name": "一号机",
+    "key": "crsr_把你的 Cursor API Key 填这里",
+    "priority": 0
+  },
+  {
+    "name": "二号机",
+    "key": "crsr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "priority": 0
+  },
+  {
+    "name": "压箱底的号（平时不用）",
+    "key": "crsr_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+    "priority": 99,
+    "disabled": false
+  }
+]

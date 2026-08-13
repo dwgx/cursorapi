@@ -1,0 +1,4 @@
+# GitHub linguist: build artifacts / auxiliary files do not participate
+# in the repository language breakdown (keeps the repo at 100% JavaScript).
+Dockerfile linguist-vendored
+*.dockerfile linguist-vendored

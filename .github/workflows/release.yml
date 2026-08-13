@@ -1,0 +1,262 @@
+# 发布流水线：tag push v* 触发。
+#
+# 参照 windsurf/kirostudio 的成熟形态：
+#   test（唯一门禁，含版本门禁）→ docker（GHCR）+ 二进制矩阵 → release。
+#
+# 关键约束（实测验证，2026-08-13）：
+#   - @cursor/sdk 的本地 agent 依赖平台原生二进制（sdk-<os>-<arch> 包），
+#     npm 按 optionalDependencies 只装当前平台的 —— 所以二进制必须
+#     矩阵构建（各 runner 自己 npm install + pkg 打自己的平台），
+#     不能一个 runner 交叉打三平台。
+#   - pkg 打包：esbuild 先打 src 为单文件 CJS（--packages=external），
+#     pkg 的 scripts 通配把 @cursor/sdk/dist/cjs/** 全量 chunk 打进去，
+#     assets 收平台包的 bin/vendor（cursorsandbox/rg/tree-sitter）。
+#   - macos-x64 是非阻塞 job（runner 贵且慢，赶不上发布照发）。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # esbuild bundle 门禁：顶层 await / 解析错误在这里就炸，
+      # 而不是让 4 个二进制 job 在发布时集体红掉。
+      - run: npm run build:bundle
+      # 版本门禁：tag 必须等于 package.json version。
+      # hasUpdate 判定是「远端最大 tag > 本地 version」，tag 忘了同步
+      # package.json 会造成无限升级循环（kirostudio release.yml 同款坑）。
+      - name: 版本门禁
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag=$TAG 与 package.json version=$PKG 不一致，拒绝发布"
+            exit 1
+          fi
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_COMMIT=${{ github.sha }}
+
+  create-release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          body_path: docs/releases/RELEASE_NOTES_${{ github.ref_name }}.md
+          prerelease: ${{ contains(github.ref, '-') }}
+
+  # OTA zip 模式的源码包资产：updater.mjs 从 release 资产下载
+  # cursorapi-src-<tag>.tar.gz（镜像链），.sha256 文件强制 github.com 直连取
+  # （独立可信信道，双信道防镜像投毒——镜像可同时投毒包+版本号，但改不了
+  # 直连 github 的哈希）。两资产必须同名配套，改名要同步 src/updater.mjs。
+  source-package:
+    permissions:
+      contents: write
+    needs: [test, create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 打源码包 + sha256
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix=cursorapi-${{ github.ref_name }}/ \
+            -o dist/cursorapi-src-${{ github.ref_name }}.tar.gz HEAD
+          sha256sum dist/cursorapi-src-${{ github.ref_name }}.tar.gz \
+            > dist/cursorapi-src-${{ github.ref_name }}.tar.gz.sha256
+      - name: 上传到 release
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            dist/cursorapi-src-${{ github.ref_name }}.tar.gz \
+            dist/cursorapi-src-${{ github.ref_name }}.tar.gz.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binary-macos-arm64:
+    permissions:
+      contents: write
+    needs: [test, create-release]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build:bundle && npx pkg src/_bundle.cjs --config package.json --targets node22-macos-arm64 --output dist/cursorapi-macos-arm64
+      - name: 冒烟（spawn + ping + 模型目录）
+        run: |
+          CURSOR_PORT=3999 CURSOR_ACCOUNTS=/tmp/nonexist.json ./dist/cursorapi-macos-arm64 > /tmp/smoke.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3999/ping > /dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:3999/ping || { cat /tmp/smoke.log; exit 1; }
+          # 模型目录要拉 Cursor 上游：无号时返回 502 但说明 SDK 已初始化成功
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3999/v1/models -H "Authorization: Bearer t")
+          if [ "$code" != "200" ] && [ "$code" != "502" ]; then cat /tmp/smoke.log; echo "unexpected /v1/models status: $code"; exit 1; fi
+          kill %1 || true
+      - name: 上传到 release
+        run: |
+          sha256sum dist/cursorapi-macos-arm64 > dist/cursorapi-macos-arm64.sha256
+          gh release upload ${{ github.ref_name }} dist/cursorapi-macos-arm64 dist/cursorapi-macos-arm64.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binary-macos-x64:
+    permissions:
+      contents: write
+    needs: [test, create-release]
+    runs-on: macos-26-intel
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build:bundle && npx pkg src/_bundle.cjs --config package.json --targets node22-macos-x64 --output dist/cursorapi-macos-x64
+      - name: 上传到 release
+        run: |
+          sha256sum dist/cursorapi-macos-x64 > dist/cursorapi-macos-x64.sha256
+          gh release upload ${{ github.ref_name }} dist/cursorapi-macos-x64 dist/cursorapi-macos-x64.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binary-windows-x64:
+    permissions:
+      contents: write
+    needs: [test, create-release]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: 构建（pkg-fetch 下载偶发失败，重试 3 次）
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            npm run build:bundle
+            if ($LASTEXITCODE -ne 0) { Write-Host "bundle failed (attempt $i)"; continue }
+            npx pkg src/_bundle.cjs --config package.json --targets node22-win-x64 --output dist/cursorapi-win-x64.exe
+            if ($LASTEXITCODE -eq 0) { break }
+            Write-Host "pkg failed (attempt $i); retrying..."
+            Start-Sleep -Seconds 10
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: 冒烟（spawn + ping）
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\cursorapi-win-x64.exe" -PassThru -WindowStyle Hidden -Environment @{ CURSOR_PORT = "3999"; CURSOR_ACCOUNTS = "$env:TEMP\nonexist.json" }
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 500
+              try { if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3999/ping).StatusCode -eq 200) { $ok = $true; break } } catch {}
+            }
+            if (-not $ok) { Get-Content dist\..\smoke.log -ErrorAction SilentlyContinue; exit 1 }
+            Write-Host "windows smoke OK"
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          }
+      - name: 上传到 release
+        shell: pwsh
+        run: |
+          Get-FileHash dist\cursorapi-win-x64.exe -Algorithm SHA256 | ForEach-Object { $_.Hash.ToLower() + "  cursorapi-win-x64.exe" } | Set-Content dist\cursorapi-win-x64.exe.sha256
+          gh release upload ${{ github.ref_name }} dist\cursorapi-win-x64.exe dist\cursorapi-win-x64.exe.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binary-linux-x64:
+    permissions:
+      contents: write
+    needs: [test, create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build:bundle && npx pkg src/_bundle.cjs --config package.json --targets node22-linux-x64 --output dist/cursorapi-linux-x64
+      - name: 冒烟（spawn + ping）
+        run: |
+          CURSOR_PORT=3999 CURSOR_ACCOUNTS=/tmp/nonexist.json ./dist/cursorapi-linux-x64 > /tmp/smoke.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:3999/ping > /dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:3999/ping || { cat /tmp/smoke.log; exit 1; }
+          kill %1 || true
+      - name: 上传到 release
+        run: |
+          sha256sum dist/cursorapi-linux-x64 > dist/cursorapi-linux-x64.sha256
+          gh release upload ${{ github.ref_name }} dist/cursorapi-linux-x64 dist/cursorapi-linux-x64.sha256 --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: [docker, binary-macos-arm64, binary-windows-x64, binary-linux-x64, binary-macos-x64, source-package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # 资产已由各二进制 job 直接 gh release upload（draft 阶段）。
+      # 这里只定稿发布；sha256 在各自 job 生成上传。
+      - name: 定稿发布
+        run: gh release edit ${{ github.ref_name }} --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

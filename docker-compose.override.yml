@@ -1,0 +1,9 @@
+services:
+  cursorapi:
+    container_name: skiapi-cursorapi
+    networks:
+      - skiapi
+
+networks:
+  skiapi:
+    external: true
