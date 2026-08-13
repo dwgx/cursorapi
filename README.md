@@ -118,12 +118,12 @@ flowchart LR
 |---|---|
 | 双协议 | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`，流式 / 非流式都支持 |
 | 动态模型目录 | 启动时从 Cursor 云端拉取（约 35 个），1 小时缓存，`[参数]` 后缀自动对维度 |
-| 账号池 | 5 维选号（健康 / 新号冷却 / 在飞 / RPM / 优先级）· 429/5xx/auth 三级冷却 · `Cursor.me()` 探活恢复 · 热重载不中断服务 |
+| 账号池 | 5 维选号（健康 / 新号冷却 / 在飞 / RPM / 优先级）· 429/5xx/鉴权/quota 分级冷却 · `Cursor.me()` 探活恢复 · 热重载不中断服务 |
 | 工具中继 | 客户端声明的工具翻成 `tool_calls` 交回客户端执行，并行调用批量下发、断流缓存补发 |
 | 热配置 | `PUT /admin/config` 即时改运行时参数，重启才生效的字段自动进 `restartFields` |
 | OTA 更新 | git / zip 双模式，崩溃循环自动回滚守卫，面板一键检查 / 执行 |
 | 多平台 | Docker 镜像（GHCR 多架构）+ 单二进制（Linux / macOS / Windows）+ 源码运行 |
-| 管理面板 | 登录会话 · 账号批量导入导出 · 日志 SSE 实时流 · 模型厂商分组 · 用量统计 · 设置 · 更新 |
+| 管理面板 | 登录会话 · 账号批量导入导出 · 日志 SSE 实时流 + 最近请求明细 · 模型厂商分组 · 用量统计 · 设置 · 更新 |
 
 ## 快速开始
 
@@ -292,10 +292,10 @@ curl -N http://localhost:8008/v1/chat/completions \
 
 | 功能 | 说明 |
 |---|---|
-| 账号管理 | 加号（先验 key 再落盘）、批量导入（坏的跳过好的照加，上限 200）、批量启停/探活/删除（上限 500）、导出（只含掩码）、改名字/优先级 |
+| 账号管理 | 加号（先验 key 再落盘）、批量导入（坏的跳过好的照加，上限 200）、批量启停/探活/删除（上限 500）、导出（只含掩码）、改名字/优先级、搜索过滤、冷却倒计时、一键复制完整 Key |
 | 模型目录 | 全量模型 + 厂商分组 + 参数维度 |
-| 日志 | 实时 SSE 流（回放最近 50 条 + 15s 心跳）+ jsonl/txt 导出 |
-| 统计 | 总量 / 模型维度 / 账号维度 / 小时桶（30 天），含成功率与平均延迟 |
+| 日志 | 实时 SSE 流（回放最近 50 条 + 15s 心跳，断线自动重连）+ 最近请求明细表（一个请求一行，点击展开详情）+ jsonl/txt 导出 |
+| 统计 | 总量 / 模型维度 / 账号维度 / 小时桶（30 天），含成功率与平均延迟；图表带图例（区间合计）、Y 轴从 0 起取整刻度、tooltip 显示成功率 |
 | 设置 | 配置热更（`GET`/`PUT /admin/config`，secret 脱敏，重启才生效的字段标 `restartOnly`） |
 | 更新 | 检查更新 / 执行更新（`CURSOR_OTA_ENABLED=true` 才放行）/ 回滚点状态 |
 
@@ -318,6 +318,7 @@ GET    /admin/config                 当前生效配置（secret 脱敏）
 PUT    /admin/config                 部分热更（restart-only 字段进 restartFields）
 GET    /admin/logs                   SSE 日志流
 GET    /admin/logs/export            导出日志（jsonl|txt）
+GET    /admin/requests               最近请求明细（环形缓冲，默认 50 条，上限 500）
 GET    /admin/stats                  用量聚合（总量/模型/账号/小时桶）
 GET    /admin/update/check           检查更新
 POST   /admin/update/perform         执行更新（CURSOR_OTA_ENABLED=true 才放行）
@@ -354,6 +355,10 @@ npm test
 # node test-sessionauth.mjs   # 会话级鉴权失效处置
 # node test-runtime-settings.mjs  # 配置热更新
 # node test-updater.mjs       # OTA（版本/守卫/回滚）
+# node test-rate-limit.mjs    # 入站限流（XFF 信任模型、伪造换桶）
+# node test-relay-cancel.mjs  # run 取消资源释放（load hook 伪造 SDK，配 test-relay-hook.mjs）
+# node test-http-helpers.mjs  # 响应/读体
+# node test-logger.mjs        # 日志分级/环形缓冲
 ```
 
 要花额度的验证（一次 1 个 request）：起服务后真发一条请求。

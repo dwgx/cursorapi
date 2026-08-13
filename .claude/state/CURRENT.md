@@ -1,37 +1,45 @@
 # CURRENT — cursorapi 会话状态
 
-> 建于 2026-08-14 接手会话（/onboard）。此前交接散在 HANDOFF.md 与 .opencode/state.md，本文件起为 .claude/state/ 规范位置。
-> 本会话约定：派 subagent 时 model 用 claude-fable-5[1m]。
+> 更新：2026-08-14（v0.1.0 发布 + 文档全量同步后）。交接散在 HANDOFF.md 与 .opencode/state.md，本文件为 .claude/state/ 规范位置，三者同步维护。
 
 ## 目标
 
-本会话任务待用户指定。候选方向（来自 HANDOFF.md 待办）：
-- Phase 1 池核心：粘性会话（prompt cache 成本）→ 原子选号（并发惊群）。熔断半开已存在（HEAD 提交提到 half-open）。
-- B 面真实链路压测：脚本 pressure-ota/b-real.mjs 就绪，被两个真实 key 401 失效阻塞，key 恢复后 30 秒可跑。
-- 本地 .env 迁移（旧前缀/旧端口 → CURSOR_*/8008）；README 功能细节滞后。
+本会话任务已完成（v0.1.0 发布 + 文档同步）。候选方向（等用户指定）：
+- 生产部署 v0.1.0（等用户指令；VPS git 历史与远程不连续，需手动 reset + 重启）
+- 添加账号批量导入页面 + 多方式添加账号（auth0 换 key，CreateUserApiKey 已跑通）
+- RPM 均衡对齐 kirostudio（per-credential rpm_limit / balanced 选号 / 饱和溢出）
 
 ## 已确认事实（2026-08-14 核对 git）
 
-- HEAD 8197c6d：quota 耗尽改为持久禁用（原 30min 冷却会复活坏号导致全客户端报 usage 错，线上 bug）。工作区干净。
-- 版本线：v0.1.4（d08e99b，OTA zip 完整性双信道）+ 上述 fix。
-- 品牌已回改 cursorapi / CURSOR_* / cookie cursorapi_sess（b218018、4cca0c7）。
-- 测试：npm test 全套（需先 npm install）；test-keys / test-ui 有两处打真网（失败请求，不花钱）。
+- HEAD 5831745（docs: state 更新）；前序 57b49c3（v0.1.0 面板增强+并发加固）、1fbdede（洗刷单 commit）。
+- 洗刷：远程 tags/releases 清空、历史单 commit、版本 0.1.0；本地 backup-pre-wipe 留旧历史（v0.1.4，不推）。
+- v0.1.0 发布：tag + CI 9 job 全绿 + release 完整（4 平台二进制 + 源码包 + sha256）。
+- 测试：14 套 309 项全绿（含 test-rate-limit 15 项）。
+- 新功能（均已核实）：/admin/requests 最近请求明细（keys.mjs:568 环形 500）、入站限流（settings.mjs:92/100 + app.mjs clientIp 信任代理模型）、consume 死线（relay.mjs:39）、select 优化（keys.mjs:850-871 rank 预计算 + head 指针）、UI 便捷（复制/冷却倒计时/搜索/ESC/自动重连）。
+- 生产 nbus 仍是 v0.1.4 代码（等部署指令）。GHCR 镜像未清（等授权）。
+- 品牌：cursorapi / CURSOR_* / cookie cursorapi_sess（guard-auth.mjs:10）。
 - 无 .codegraph 索引。
 
-## 文档不一致（相信 git，不信文档）
+## 文档现状（2026-08-14 已全量同步）
 
-1. .claude/CONTEXT.md（8/13）仍是 CursurSPIKEY / CSPK_ 时期内容，品牌与 cookie 名已过期（state.md 也注明此偏差）。
-2. HANDOFF.md 被机械改名污染：多处「CURSOR_* → CURSOR_*」自我抵消，改名映射不可读。
-3. .opencode/state.md 头部写「v0.1.1 发布中」，实际已 v0.1.4+；正文各压测波次是最新的（8/14 03:26）。
-4. HEAD 的 quota 持久禁用 fix 未进任何交接文档。
+- HANDOFF.md ✓（v0.1.0 状态、待办、教训含 XFF 信任模型）
+- .opencode/state.md ✓（v0.1.0 发布完成）
+- .claude/CONTEXT.md ✓（品牌修正、新功能锚点核实、14 测试套）
+- README.md ✓（管理面板功能表 + API 表补 /admin/requests + 测试节）
+- docs/ARCHITECTURE.md ✓（补限流章节、recentRequests、select 优化）
+- docs/PLAN.md ✓（逐项勾选完成状态）
+- docs/REVERSE-UI-PLAN.md ✓（标注已完成）
+- docs/ENV-SWITCHES.md ✓（补 RATE_LIMIT_PER_MIN / TRUSTED_PROXY）
+- docs/releases/RELEASE_NOTES_v0.1.0.md ✓（v0.1.0 内容）
+- 研究类 8 篇（COMPARISON/KIRO-RESEARCH/PROTOCOL-COMPARISON/RESEARCH×2/REVERSE-SDK/SECURITY-AUDIT/ADR）保持不动——历史情报仍有效
 
 ## 风险 / 注意
 
-- ui.mjs 曾由另一 agent 重写（UI 第一批已在 v0.1.1 落地）；改前先确认无并行会话在动它。
-- relay.mjs waitTurn 已事件驱动化（0e87259），旧文档中「非流式 idle 超时候选 bug」需按新代码复核。
-- 8103/8105 端口曾有遗留压测实例，动压测前先查。
+- ui.mjs 改前先确认无并行会话在动它（模板字符串转义地狱，改完必须 node --check）。
+- 生产部署 v0.1.0 时 VPS git 模式 OTA 已不可用（历史不连续），只能手动同步。
+- relay.mjs waitTurn 事件驱动（0e87259）与 consume 死线（v0.1.0）已在文档反映。
 
 ## 待办
 
-- [ ] 等用户指定本会话任务
-- [ ] （顺手项）CONTEXT.md 品牌/cookie 名过期内容更新
+- [ ] 等用户指定下一任务（生产部署 / 批量导入 / RPM 均衡）
+- [ ] GHCR 清理（等授权）

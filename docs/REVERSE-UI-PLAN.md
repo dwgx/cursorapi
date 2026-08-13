@@ -1,5 +1,8 @@
 # 逆向 + UI 改造计划（2026-08-13）
 
+> **状态（2026-08-14）：已完成。** Wave 1 逆向研究落盘 REVERSE-SDK.md 系列（REVERSE-SDK.md / RESEARCH-2026-08.md / RESEARCH-2026-08-EXTERNAL.md / PROTOCOL-COMPARISON.md）；
+> Wave 2 UI 改造随 v0.1.0 落地（暗色主题/统计图表/请求明细/复制等）。本文件保留为历史计划。
+
 > 目标：① 全面逆向 @cursor/sdk（协议层之外的所有东西：local runtime、ConnectRPC 全集、
 > 错误/限流矩阵、模型/工具细节），联网补全社区逆向成果；② cursorapi UI 改成 windsurf 风格。
 > 产出：逆向研究报告（docs/REVERSE-SDK.md 系列）+ UI 改造（ui.mjs → windsurf 风格）。

@@ -15,16 +15,16 @@
 
 ```
 boot.mjs                 启动入口：OTA 崩溃守卫先跑（guard.bumpBootAttempts），再加载 src/app.mjs
-src/app.mjs              HTTP 入口：路由、两级鉴权、生命周期、重启钩子
+src/app.mjs              HTTP 入口：路由、两级鉴权、生命周期、重启钩子；入站限流（rateLimitPerMin/clientIp/createRateLimiter，XFF 仅信任代理）
 src/guard-auth.mjs       鉴权：client（/v1/*）与 admin（/admin/*）两级，常量时间比较
 src/sessions.mjs         管理面会话：内存 token，12h TTL，暴力破解延迟惩罚（不锁死）
-src/settings.mjs         静态配置：env → 默认值，启动时求值一次，坏值启动即抛
+src/settings.mjs         静态配置：env → 默认值，启动时求值一次，坏值启动即抛（含 rateLimitPerMin/trustedProxy）
 src/runtime-settings.mjs 热配置层：runtime-config.json 覆盖，注册表 + 类型校验 + 原子写盘 + 脱敏
 src/catalog.mjs          模型目录：上游动态拉取 + 1h 缓存 + name[参数] 解析 + 便宜档默认
 src/openai.mjs           OpenAI 适配器：/v1/chat/completions 解析与响应成形
 src/anthropic.mjs        Anthropic 适配器：/v1/messages 解析与响应成形
-src/relay.mjs            回合编排：选号、failover、等轮、结算
-src/keys.mjs             账号池：文件持久化、5 维选号、错误归类、冷却、探活、记账
+src/relay.mjs            回合编排：选号、failover、等轮、结算；consume 死线兜底（consumeDeadlineMs）
+src/keys.mjs             账号池：文件持久化、5 维选号、错误归类、冷却、探活、记账；recentRequests 环形缓冲（pushRecentRequest/listRecentRequests）
 src/tool-relay.mjs       工具中继：RelayTurn 状态机、批量合批、缓存补发、结果对号
 src/format.mjs           纯函数：messages → 单 prompt、usage 字段映射
 src/stream.mjs           OpenAI SSE 写入器 + 收集 sink
@@ -209,6 +209,10 @@ rankVector = [disabled?1:0, 新号宽限期?1:0, inflight, rpm(60s 滑动), prio
 
 `select()` 同步预留 `inflight` 并记录 rpm 槽位——消除「选好了但还没用上」的窗口。被排除的号（本请求已试过）不再进候选。
 
+**select 热路径优化**（行为不变，只改复杂度）：每次选号先把全部候选的滑动窗口 flush 一遍（`slidingLoad`），再一次性预计算每个候选的 5 维 rank 向量（`rankVector`），排序比较只读纯向量——旧实现是在比较器里每次重新派生 rank（每次 select 是 O(n log n) 次分配，规模时号池的主成本）。滑动窗口用 head 指针 + 计数（`_rtHead`）而非每次遍历全窗口，数组整体替换时以 `_rtArr` 引用校验 head 有效性，避免新数组上误用旧指针丢计数（keys.mjs:850-871, 961-977）。
+
+**recentRequests 内存明细**：`pushRecentRequest` / `listRecentRequests` 维护 500 条环形缓冲（`RECENT_REQUESTS_CAP`），每个完成的请求一行（时间戳 / 模型 / 账号名 / 成功 / 耗时 / token / 错误摘要），是 `GET /admin/requests` 的数据源（keys.mjs:564-597）。纯内存不入盘——与磁盘记账（见第 11 章）并列，重启丢失，只为管理面板的请求明细表服务。
+
 ### 4.2 失败分类（classifyError）与冷却分级
 
 ```
@@ -320,7 +324,15 @@ listen 成功 → clearBootAttempts()（清计数）
 - zip 模式 `swapSrc`：`src/` → `cursorapi.bak`（旧版成了回滚点），新包 rename 进来，同文件系统内原子。
 - 有 supervisor 时重启 `exit(75)`（EX_TEMPFAIL）等拉起；否则 spawn 分离子进程再退出。重启前先优雅排空：`pool.flush()` 落盘记账 → `server.close()` 等在飞请求 → 10s 兜底 `closeAllConnections`。
 
-## 10. 记账体系
+## 10. 数据面限流
+
+`CURSOR_RATE_LIMIT_PER_MIN`（`rateLimitPerMin`，默认 0 = 关）开启后，数据面（`/v1/*`）按客户端 IP 做 **60 秒固定窗口**计数（`RATE_WINDOW_MS`，`createRateLimiter`，app.mjs:399-503）：窗口内超过限额返回 429 `rate_limit_error`，响应带 `Retry-After`（剩余窗口秒数，向上取整）。检查点在鉴权通过之后、处理之前（`dispatchData`，app.mjs:535-548）——无 key 的洪泛不计桶，10k rps 的客户端在进入号池前就被拦下。
+
+**XFF 信任模型**（`clientIp`，app.mjs:441-461）：只在 socket 对端是 `CURSOR_TRUSTED_PROXY`（`trustedProxy`，逗号分隔列表）配置的代理时才读取 `X-Forwarded-For`，且只信**最右段**、还要求它是公网地址（伪造的私有/回环段回退 socket 地址）。**未配置信任代理时一律忽略 XFF**——否则任意客户端都能伪造公网 IP 每请求换一个新桶（绕过限流 + 桶表无限增长）。桶表有界：上限 10000 个 IP（`RATE_IP_CAP`），超限先清扫已过期窗口、再逐出最旧存活者，伪造洪泛也长不大。
+
+**只挡数据面**：限流挂在数据面路由入口，管理面 `/admin/*` 不经过（管理面有自己的登录延迟惩罚，见第 7 章鉴权）。
+
+## 11. 记账体系
 
 两层，都落在账号池文件同目录，原子写盘：
 
@@ -334,12 +346,13 @@ listen 成功 → clearBootAttempts()（清计数）
 - `reportSuccess(account, usage)`：runs +1、失败清零、429 阶梯清零、累计 token。
 - `reportFailure(account, err)`：failures +1、按分类走冷却/禁用（见 4.2）、`lastError` 存完整错误形状。
 - `recordRequest(model, success, durationMs, accountId, tokens)`：进总量、模型维度（含 msSum/msCount → avgMs）、账号维度、小时桶。
+- `pushRecentRequest({ts, model, accountId, success, ms, tokens, error?})`：与 `recordRequest` 并列、同一处 settle 同步推（relay.mjs:306-322），进 500 条环形缓冲供 `GET /admin/requests`（见 4.1）。**纯内存不入盘**——磁盘记账只有上面三种，重启后明细表为空但聚合账不丢。
 
 「工具往返不是轮」直接体现在记账上：只有真正的轮结束（handle 或 resumeTurn 的 settle）才记账，`waitTurn` 的工具边界返回不触发。
 
 `/admin/stats` 输出：总量 + 按请求数降序的模型表（含平均耗时）+ 账号表 + 小时桶时间序列。`/admin/accounts/export` 导出账号清单（**只含掩码 key**，明文在服务器上读文件）。
 
-## 11. 已知边界与未解问题
+## 12. 已知边界与未解问题
 
 - 额度查询：`Agent.getUsage()` 对普通账号返回 `403 feature_unavailable`（Team/Enterprise 专属），所以**额度打光只能打到报错才知道**，然后换号重试。耗尽时的 SDK 错误形状还没有实测样本，目前落进通用 RETRY_OTHER 规则——行为正确，不够精确；日志会记全错误形状，撞上第一次就能在 `classify` 加一条规则。
 - cloud agent 不支持 customTools（工具中继仅 local runtime）。
