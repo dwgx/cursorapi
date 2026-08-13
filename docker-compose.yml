@@ -1,0 +1,42 @@
+services:
+  cursorapi:
+    build: .
+    image: cursorapi:local
+    container_name: cursorapi
+    restart: unless-stopped
+
+    environment:
+      CURSOR_HOST: 0.0.0.0
+      CURSOR_PORT: 8008
+      CURSOR_ACCOUNTS: /data/accounts.json
+      CURSOR_WORKSPACE: /work
+      CURSOR_CLIENT_KEYS: ${CURSOR_CLIENT_KEYS}
+      CURSOR_ADMIN_KEY: ${CURSOR_ADMIN_KEY}
+      CURSOR_PREFIX: ${CURSOR_PREFIX:-}
+      CURSOR_PROBE_INTERVAL_MS: ${CURSOR_PROBE_INTERVAL_MS:-1800000}
+      CURSOR_MAX_ACCOUNT_ATTEMPTS: ${CURSOR_MAX_ACCOUNT_ATTEMPTS:-3}
+      CURSOR_ALLOW_SUBAGENTS: ${CURSOR_ALLOW_SUBAGENTS:-false}
+      CURSOR_LOG_LEVEL: ${CURSOR_LOG_LEVEL:-info}
+      TZ: Asia/Shanghai
+
+    volumes:
+      # The accounts file + usage records (cursorapi-stats.json lands in
+      # the same directory). Must be writable: the usage record is this
+      # service's only ledger, and memory-only would zero it on every
+      # restart.
+      - ./data:/data
+      # The agent's cwd. In tool-relay mode the agent never touches the
+      # filesystem; this is only here because the SDK requires it.
+      - ./work:/work
+
+    ports:
+      # Bind localhost only. Behind this sits the quota of a whole pool of
+      # Cursor accounts; expose it outward via a reverse proxy + HTTPS, and
+      # make sure CURSOR_CLIENT_KEYS is a long random string.
+      - "127.0.0.1:8008:8008"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

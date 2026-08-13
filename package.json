@@ -1,0 +1,39 @@
+{
+  "name": "cursorapi",
+  "version": "0.1.0",
+  "description": "Cursor API key pool exposed as an OpenAI/Anthropic-compatible gateway, via @cursor/sdk",
+  "type": "module",
+  "main": "src/app.mjs",
+  "scripts": {
+    "start": "node boot.mjs",
+    "test": "node test-keys.mjs && node test-format.mjs && node test-protocol.mjs && node test-tool-relay.mjs && node test-guard-auth.mjs && node test-http-helpers.mjs && node test-logger.mjs && node test-ui.mjs && node test-sessionauth.mjs && node test-runtime-settings.mjs && node test-updater.mjs && node test-relay-cancel.mjs && node test-relay-hook.mjs",
+    "build:bundle": "esbuild boot.mjs --bundle --platform=node --format=cjs --target=node22 --packages=external --external:node:* --define:import.meta.url=__WA_IMPORT_META_URL__ --banner:js=\"const __WA_IMPORT_META_URL__=require('node:url').pathToFileURL(__filename).href;\" --outfile=src/_bundle.cjs",
+    "build:exe": "npm run build:bundle && pkg src/_bundle.cjs --config package.json --targets node22-macos-arm64 --output dist/cursorapi-macos-arm64"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@cursor/sdk": "^1.0.27"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.22.0",
+    "esbuild": "^0.28.2"
+  },
+  "pkg": {
+    "scripts": [
+      "node_modules/@cursor/sdk/dist/cjs/**/*.js",
+      "node_modules/@cursor/sdk/cursor-sdk-shared/**/*.js"
+    ],
+    "assets": [
+      "node_modules/@cursor/sdk-*/bin/**/*",
+      "node_modules/@cursor/sdk-*/vendor/**/*",
+      "package.json"
+    ],
+    "targets": [
+      "node22-macos-arm64",
+      "node22-macos-x64",
+      "node22-win-x64",
+      "node22-linux-x64"
+    ],
+    "outputPath": "dist"
+  }
+}

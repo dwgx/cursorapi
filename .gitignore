@@ -1,0 +1,40 @@
+node_modules/
+.env
+# 号池文件里是明文 key，用量记录是运行数据 —— 都不该进版本库
+data/
+work/
+accounts.json
+*-stats.json
+*.log
+
+# OTA 健康标记/回滚点（运行产物）
+cursorapi.health
+cursorapi.boot_attempts
+cursorapi.bak
+cursorapi.failed.*
+runtime-config.json
+.ota-tmp/
+
+# 构建产物
+dist/
+src/_bundle.cjs
+
+# 压测运行产物（脚本与报告保留在仓库里）
+pressure/*.csv
+pressure/monitor.ready
+pressure/phases.jsonl
+pressure/ctl-log.json
+pressure/ctl-log.done.*
+pressure/p3-export-sample.json
+pressure2/*.csv
+pressure2/monitor.ready
+pressure2/phases.jsonl
+pressure2/ctl-log.json
+pressure2/ctl-log.done.*
+pressure2/fetch-count.json
+pressure2/results.json
+bench/results.json
+scripts/stress/results/
+
+# Claude Code 会话状态文件（自动生成）
+.claude/state/
