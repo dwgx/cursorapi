@@ -37,8 +37,11 @@ tool-relay.mjs（RelayTurn 状态机：80ms 攒批/并行缓存补发/isError �
 
 - **版本**：v0.1.0（洗刷后首个版本；CI 9 job 全绿；release 含 4 平台二进制 + 源码包 + sha256 双信道）
 - **git 历史已洗刷**：远程/本地均为单 commit 重新初始化（`v0.1: initial commit` → 57b49c3 面板增强+并发加固 → 5831745 docs）；旧 24 commit 完整历史保留在本地 `backup-pre-wipe` 分支（不推远程）
-- **本地**：main = 5831745；14 套测试全绿（309 项，含新增 test-rate-limit 15 项）
-- **生产（nbus）**：38.244.34.15:8008，`/opt/cursorapi`（源码 + systemd cursorapi.service），**仍是 v0.1.4 代码**（洗刷后远程历史重写，git 模式 OTA 无法 ff-merge；部署 v0.1.0 需手动同步 + 重启，**等用户指令**），号池 2/2 可用（kirsthillerman61 ×2），CURSOR_MODEL_DEFAULTS 已配 `{"claude-fable-5":"[1m]"}`
+- **本地**：main = c1a1083；14 套测试全绿（309 项，含新增 test-rate-limit 15 项）
+- **生产（nbus）**：38.244.34.15:8008，`/opt/cursorapi`（源码 + systemd cursorapi.service），**已部署 v0.1.0（2026-08-14，用户授权）**：main 分支对齐 origin/main（c1a1083），OTA git 模式可用（check 实测：mode=git / behind=0 / hasUpdate=false / enabled=true；fetch + ff-merge 链路均实测通过）；健康标记 version=0.1.0
+  - **号池当前为空**（`data/accounts.json` = `[]`，05:43 被清空；内存同步为空；备份 `data/accounts.json.bak.20260814045246` 含 1 个号 sz，未动——是否恢复由用户决定）；用户之前用的 kirsthillerman61 号不在任何备份里
+  - **配置在 systemd unit 内联 Environment**（无 .env 文件）：CURSOR_HOST/0.0.0.0、PORT 8008、ACCOUNTS=/opt/cursorapi/data/accounts.json、CLIENT_KEYS 与 ADMIN_KEY 同值、OTA_ENABLED=true、OTA_SUPERVISOR=systemd、MemoryMax=256M
+  - CURSOR_MODEL_DEFAULTS `{"claude-fable-5":"[1m]"}` 在 `data/runtime-config.json`（热配置，随部署保留）
 - **kirostudio（nbus）**：/opt/kirostudio，8990 端口，凭据含 cursorapi custom_api 透传凭据（baseUrl `http://38.244.34.15:8008/v1`——**必须带 /v1**，否则探测模型 404）
 - **skiapi（143.20.230.62）**：只读监督，**不碰**（用户其他服务在跑）
 - **GHCR 镜像未清**：ghcr.io/dwgx/cursorapi（0.1.0/0.1/latest）是旧 v0.1.4 构建残留，v0.1.0 的 CI 已推新镜像覆盖同名 tag；如需彻底清空 gh token 需 packages scope（gh auth refresh 或网页删）
@@ -53,11 +56,12 @@ tool-relay.mjs（RelayTurn 状态机：80ms 攒批/并行缓存补发/isError �
 
 ## 五、待办
 
-1. **生产部署 v0.1.0**（等用户指令）：VPS git 历史与远程不连续，需 `git fetch origin && git reset --hard origin/main`（先备份）后重启 cursorapi.service
+1. **号池为空（生产）**：部署后号池 0/0——需要用户把有效 crsr_ key 加回（面板「账号管理」或备份 sz 号恢复）；kirsthillerman61 号已不在池里（05:43 清空，无备份）
 2. **GHCR 清理**（等用户授权）：gh auth refresh -s read:packages,delete:packages 或网页删
 3. **UI/后端**：添加账号批量导入页面（多行粘贴/格式校验/逐条探活/汇总）、多方式添加账号（crsr_ key / auth0 token 换 key / 邮箱+密码；端点 `POST /admin/accounts/import-auth0`）
 4. **RPM 均衡**：per-credential rpm_limit / balanced 选号 / 饱和溢出——对齐 kirostudio token_manager.rs
-5. **监督日常**：探活 nbus + 出入研究（/admin/stats + 日志）+ 性能基线（bench/ 可复跑）
+5. **下次发版时实测 OTA perform**：v0.1.1 发布后 VPS 面板一键更新应直接可用（git 模式 ff-merge + exit(75) systemd 拉起）；本次未实弹（无更新时 perform 也会重启，不冒无谓风险）
+6. **监督日常**：探活 nbus + 出入研究（/admin/stats + 日志）+ 性能基线（bench/ 可复跑）
 
 ## 六、红线（生产铁律）
 
