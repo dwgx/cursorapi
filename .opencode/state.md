@@ -1,44 +1,37 @@
 # cursorapi 会话状态（2026-08-14 洗刷后重新开始）
 
-> 当前阶段：**v0.1 洗刷后 → UI 增强波次 → 准备发版 v0.1.0（tag+release+CI）**
-> 仓库：dwgx/cursorapi（公开）。本地 main = 洗刷后单 commit `1fbdede v0.1: initial commit`，远程 main 已 force push 同步；远程 tags/releases 已清空；本地 tags 已清。
+> 当前阶段：**v0.1.0 已发布**（CI 全绿，release 完整）→ 待办：生产部署决策 + GHCR 清理
+> 仓库：dwgx/cursorapi（公开）。main = 57b49c3（v0.1.0），tag v0.1.0 已推，CI 9 job 全绿。
 > 备份分支 **backup-pre-wipe**（旧完整历史 24 commit，v0.1.4，不推远程）。
-> 版本：package.json = 0.1.0（发版时 tag v0.1.0 + release）。
+> 版本：package.json = 0.1.0，release 含 4 平台二进制 + 源码包 + sha256 双信道。
 > 遗留：GHCR 镜像（ghcr.io/dwgx/cursorapi 0.1.0/0.1/latest）未清——gh token 缺 packages scope，需用户授权或网页删除。
 
-## 本波次（UI 增强 + 请求明细，已实现待修 MAJOR）
+## v0.1.0 发布内容（57b49c3）
 
-### 已完成（13 套测试全绿）
-- **T1 后端请求明细**（app.mjs/keys.mjs/relay.mjs + 测试）：
-  - keys.mjs `pushRecentRequest`/`listRecentRequests`：内存环形缓冲 500 条（keys.mjs:564-596），error 截断 200 字符，accountName 取 push 时池状态
-  - relay.mjs settle（297-313）：recordRequest 处同步 push；只在 settle 主路径推
-  - app.mjs `GET /admin/requests?limit=N`（235-242）：默认 50、上限 500
-  - test-keys 97 通过、test-ui 24 通过
-- **T2+T3 UI**（src/ui.mjs + test-ui.mjs，test-ui 28 通过）：
-  - footer 注销→退出登录；主题切换按钮挪 page-header；footer 换设置按钮（go('settings')）
-  - 日志页「最近请求」明细表（renderLogsView 1548-1653）：时间/模型/账号/结果徽标/耗时/Token，点击行展开详情，SSE 心跳顺带刷新（3s 节流）
-  - 统计图增强（drawLine 2078-2217）：图例（请求蓝/成功率绿+区间合计）、Y 轴 0 起 nice 刻度、X 轴智能步进 ≤6、tooltip 加成功率
-  - 账号管理「复制完整 Key」按钮（复用既有 /admin/accounts/:id/secret，app.mjs:383，HEAD 已有）
-  - conn 页 5 个复制按钮（copyText/copyBtn，clipboard try/catch + fallbackCopy 降级）
-  - 设置页 secret 显示明文：**不做**（后端一律掩码，无支持端点）
-- **对抗式 review 结论**（可交付但先修 2 个 MAJOR）：
-  - **M1**（ui.mjs:1561）：maybeRefreshRequests 无 in-flight 守卫 → 进日志页打 ~50 个重复请求、故障时帧率即请求率。修：reqBusy 标志 + 失败退避 + reqAt 完成时更新
-  - **M2**（ui.mjs:2032-2042）：chartRange 切区间后图例合计值不重算（24h 852 vs 6h 实际 267）。修：图例值并入 drawCharts
-  - MINOR：展开态按下标索引刷新漂移；文案「最近 500 条」vs limit=200；请求表时间 UTC vs 日志本地时间；limit parseInt 怪癖；settle 热路径多余分配；测试断言空转；keys.mjs `{...rec}` 全字段拷贝
-- **A/B 调研**（对比 windsurf/kirostudio/kiro-rs）：
-  - A 前端缺口 top：冷却倒计时、账号搜索、RPM/在飞数展示、ESC 快捷键、批量导入失败明细、日志 SSE 自动重连、导出选中子集、更新后健康轮询、代理连通性测试、模型实测
-  - B 并发 top：**B1 入站限流缺失**（每-IP 固定窗口起步）、**B2 inflight 泄漏**（cancelRun 失败时 consume 永不 finally）、**B3 select 热路径**（O(n) 遍历×3 + shift O(n) memmove + rank 重复求值）、B4 记账分配、B5 persistLedger 同步阻塞、B6 SSE 订阅无上限、B7 全池 429 提前放弃、B9 连接无上限
+### 管理面板
+- 最近请求明细表（/admin/requests 环形缓冲 500 条，keys.mjs pushRecentRequest/listRecentRequests；app.mjs GET /admin/requests?limit=N；relay.mjs settle 挂钩）
+- 统计图：图例（区间合计）、Y 轴 0 起 nice 刻度、X 轴智能标注、tooltip 成功率（ui.mjs drawLine/updateLegend）
+- 复制：账号管理复制完整 Key（复用 /admin/accounts/:id/secret，HEAD 已有）、conn 页 5 处复制（clipboard try/catch + fallback）
+- 便捷：冷却倒计时（coolTick 全局 1s interval + 视图守卫）、账号搜索（af-q 200ms 防抖）、ESC 退出登录（onKeyDown，输入框不触发）、日志 SSE 断线自动重连（scheduleLogRetry 2s→30s，nostream/manual 不重试）
+- 布局：注销→退出登录、主题切换挪 header、footer 设置按钮；请求表独立 10s 刷新 ticker（reqTicker）
+- M1 修复：maybeRefreshRequests reqBusy/reqFailAt 守卫；M2：updateLegend 并入 drawCharts；catch 只清自己 controller
 
-## 本波次进行中（发版前收尾）
+### 数据面并发
+- B1 入站限流：CURSOR_RATE_LIMIT_PER_MIN（0=关）+ CURSOR_TRUSTED_PROXY（无信任代理忽略 XFF，防伪造换桶；app.mjs clientIp/createRateLimiter；test-rate-limit 15 项）
+- B2 inflight 兜底：consume 死线 2×turnIdleTimeoutMs+toolResultTimeoutMs，触发补 cancelRun（relay.mjs 394-416）
+- B3 select 优化：rank 预计算（比较器纯化）+ slidingLoad head 指针 + _rtArr 数组引用校验（keys.mjs 850-871, 962-970；200 号池 34.4→20.6µs）
 
-- [ ] 修 M1（请求表刷新风暴）、M2（图例失真）
-- [ ] 并发三件套：B1 每-IP 固定窗口限流、B2 consume deadline 兜底、B3 select 优化（rank 预计算）
-- [ ] 便捷功能：冷却倒计时、账号搜索、ESC 退出登录（HANDOFF 待办 #2，复用 askConfirm）、日志 SSE 自动重连
-- [ ] 13 套测试全绿 + 二轮 review
-- [ ] 发版：git tag v0.1.0 + push + GitHub Release + CI 全绿
-- [ ] 遗留：GHCR 清理（等授权）
+### 二轮 review 结论（发版前已修）
+- M-1 XFF 信任模型（无信任代理一律忽略 XFF）+ 两条固化绕过路径的测试修正
+- m-1~m-7 全部修复：deadline 补 cancelRun、slidingLoad 数组替换、abort 竞态、切回日志页重连、ESC 输入框守卫、请求表独立刷新、ENV-SWITCHES 文档
+- 发版判定：14 套测试全绿（97+9+30+21+15+15+7+3+34+14+22+33+9+9）
+
+## 待办
+- [ ] **生产部署决策**：VPS（nbus 38.244.34.15:8008）还是 v0.1.4 代码。洗刷后远程历史重写，VPS 的 git 模式 OTA 无法 ff-merge（历史不连续）——需手动同步（备份 → git fetch origin main → reset --hard origin/main 或重拉）+ 重启 cursorapi.service（**等用户明确指令**）
+- [ ] GHCR 清理（等授权：gh auth refresh -s read:packages,delete:packages 或网页删）
+- [ ] 后续波次（HANDOFF 待办）：批量导入页面、多方式添加账号（auth0 换 key）、RPM 均衡对齐 kirostudio
 
 ## 铁律
-- 生产（nbus 38.244.34.15:8008）不重启不直改；本地验证→用户确认→生产
-- ui.mjs 转义：JS 块禁反引号与 ${}；字符串换行 `\\n`；改完 node --check 验证
+- 生产不重启不直改；本地验证→用户确认→生产
+- ui.mjs 转义：JS 块禁反引号与 ${}；改完渲染后 script 提取 node --check
 - 凭证读 ~/.claude/SECRETS.md，值不输出；8GB 机器执行类 agent ≤5 并行
