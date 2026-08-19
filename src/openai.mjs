@@ -37,15 +37,26 @@ export function normalizeTools(tools) {
 
 /**
  * Dig tool results out of this batch: `role:"tool"` messages keyed by
- * tool_call_id. Returns null with no tool results, `{turn, results}` when an
- * id matches a live turn, `{orphan: [ids]}` when results exist but nothing
- * matches — the caller must reject the orphan case, or the batch would
- * silently bill a second run for a turn that no longer exists.
+ * tool_call_id. Returns null with no trailing tool results, `{turn, results}`
+ * when an id matches a live turn, `{orphan: [ids]}` when trailing results
+ * exist but nothing is live. The caller starts a new run for the orphan
+ * case so Claude Code compact/follow-up is not aborted with 400.
  */
+function messagesAfterLastAssistant(messages) {
+  let start = 0;
+  for (let i = (messages ?? []).length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      start = i + 1;
+      break;
+    }
+  }
+  return (messages ?? []).slice(start);
+}
+
 function digToolResults(messages) {
   const results = [];
   let turn = null;
-  for (const m of messages) {
+  for (const m of messagesAfterLastAssistant(messages)) {
     if (m?.role !== "tool" || !m.tool_call_id) continue;
     results.push({ id: m.tool_call_id, content: m.content, isError: m.is_error === true });
     turn = turn ?? lookupTurn(m.tool_call_id);
@@ -63,13 +74,7 @@ const adapter = {
 
     const resume = digToolResults(messages);
     if (resume?.orphan) {
-      // Tool results with no live turn behind them (expired timer, server
-      // restart, client resend): resuming would feed nothing, and treating
-      // the batch as fresh would bill a second run for the same turn.
-      return {
-        error: `no matching pending tool call (${resume.orphan.join(", ")}); the turn may have expired`,
-        status: 400,
-      };
+      log.warn(`stale tool_result id(s) ${resume.orphan.join(", ")}; starting a new run`);
     }
 
     return {
