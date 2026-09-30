@@ -4,16 +4,16 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg" />
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg" />
-  <img src="docs/assets/banner.svg" width="100%" alt="cursorapi — Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA" />
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg?t=6d39f0e11e89" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg?t=6d39f0e11e89" />
+  <img src="docs/assets/banner.svg?t=6d39f0e11e89" width="100%" alt="cursorapi — Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA" />
 </picture>
 
 <br/>
 
 JavaScript · none · ★4
 
-[![docs](https://github.com/dwgx/cursorapi/tree/main/docs)](https://github.com/dwgx/cursorapi/tree/main/docs) [![releases](https://github.com/dwgx/cursorapi/releases)](https://github.com/dwgx/cursorapi/releases)
+[docs](https://github.com/dwgx/cursorapi/tree/main/docs) · [releases](https://github.com/dwgx/cursorapi/releases)
 
 </div>
 <!-- dwgx-banner:END -->
