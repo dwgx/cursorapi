@@ -1,4 +1,23 @@
 <p align="center">
+
+<!-- dwgx-banner:BEGIN -->
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg" />
+  <img src="docs/assets/banner.svg" width="100%" alt="cursorapi — Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA" />
+</picture>
+
+<br/>
+
+JavaScript · none · ★4
+
+[![docs](https://github.com/dwgx/cursorapi/tree/main/docs)](https://github.com/dwgx/cursorapi/tree/main/docs) [![releases](https://github.com/dwgx/cursorapi/releases)](https://github.com/dwgx/cursorapi/releases)
+
+</div>
+<!-- dwgx-banner:END -->
+
 <pre>
 ╔════════════════════════════╗
 ║ CursorAPI               ║

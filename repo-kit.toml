@@ -1,0 +1,16 @@
+# repo-kit · 本仓库的 banner 规格
+# 改这个文件，workflow 会重新渲染 docs/assets/banner*.svg 与 README 区块
+# 生成器：https://github.com/dwgx/DWGX/tree/main/repo-kit
+owner = "dwgx"
+
+[[repo]]
+name = "cursorapi"
+style = "seq"
+tagline = "Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA"
+install = "git clone https://github.com/dwgx/cursorapi.git && cd cursorapi && npm install && node boot.mjs"
+lang = "JavaScript"
+license = "none"
+role = "GATEWAY"
+topics = ["anthropic", "api-proxy", "cursor", "key-pool", "llm-gateway"]
+messages = [["chat.completions", "request"], ["200 · openai", "reply"], ["messages", "request"], ["200 · anthropic", "reply"], ["stream · sse", "request"]]
+links = [{ label = "docs", url = "https://github.com/dwgx/cursorapi/tree/main/docs" }, { label = "releases", url = "https://github.com/dwgx/cursorapi/releases" }]
