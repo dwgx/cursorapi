@@ -4,9 +4,9 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg?t=20898289adee" />
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg?t=20898289adee" />
-  <img src="docs/assets/banner.svg?t=20898289adee" width="100%" alt="cursorapi — Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA" />
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner.svg?t=bc17790b4818" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg?t=bc17790b4818" />
+  <img src="docs/assets/banner.svg?t=bc17790b4818" width="100%" alt="cursorapi — Cursor API key pool 网关 · OpenAI / Anthropic 双协议 · 热配置 · OTA" />
 </picture>
 
 <br/>
