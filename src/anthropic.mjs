@@ -93,16 +93,31 @@ export function normalizeTools(tools) {
  * Dig tool results out of this batch: Anthropic nests `tool_result` blocks in
  * user messages (no standalone `role:"tool"`), one level deeper than OpenAI.
  *
- * Returns null when the batch carries no tool results at all, `{turn,
+ * Returns null when the trailing turn carries no tool results, `{turn,
  * results, orphan: null}` when at least one id matches a live turn, and
- * `{turn: null, results, orphan: [ids]}` when results exist but no id
- * matches anything. The caller must reject the orphan case — resuming
- * nothing would silently bill a second run for the same turn.
+ * `{turn: null, results, orphan: [ids]}` when trailing results exist but
+ * no id is live. The caller starts a new run for the orphan case: Claude
+ * Code compact/follow-up resends finished tool_result blocks, and a 400
+ * aborts autocompact.
  */
+function messagesAfterLastAssistant(messages) {
+  let start = 0;
+  for (let i = (messages ?? []).length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      start = i + 1;
+      break;
+    }
+  }
+  return (messages ?? []).slice(start);
+}
+
 function digToolResults(messages) {
   const results = [];
   let turn = null;
-  for (const m of messages ?? []) {
+  // Only the trailing user turn after the last assistant reply can resume a
+  // live RelayTurn. Historical tool_result blocks in earlier user messages
+  // belong to finished turns; treating them as resume 400s the next prompt.
+  for (const m of messagesAfterLastAssistant(messages)) {
     if (m?.role !== "user" || !Array.isArray(m.content)) continue;
     for (const block of m.content) {
       if (block?.type !== "tool_result" || !block.tool_use_id) continue;
@@ -323,14 +338,11 @@ const adapter = {
 
     const resume = digToolResults(messages);
     if (resume && !resume.turn) {
-      // Tool results with no live turn behind them: the original turn expired
-      // (result timeout, server restart, client resend). Resuming would feed
-      // nothing; treating the batch as fresh would bill a second run for the
-      // same turn. Say so and let the client retry.
-      return {
-        error: `no matching pending tool call (${resume.orphan.join(", ")}); the turn may have expired`,
-        status: 400,
-      };
+      // Stale tool_result after the last assistant (compaction, follow-up, or
+      // an already-finished turn). 400 here aborts Claude Code auto-compact
+      // and surfaces as "Prompt is too long · automatic compaction failed".
+      // Start a new run with the folded prompt instead of resume.
+      log.warn(`stale tool_result id(s) ${resume.orphan.join(", ")}; starting a new run`);
     }
 
     return {

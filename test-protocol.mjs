@@ -348,10 +348,11 @@ test("collect sink: converts usage, keeps content", () => {
   assert.equal(c.content, "answer");
 });
 
-// ── entry guard: orphan tool results must 400, never bill a new run ────
-// A tool_result whose id matches no live turn used to be treated as a fresh
-// request: new account, new run, second billing for the same turn. It must
-// come back as 400 invalid_request_error so the client retries instead.
+// ── stale tool_result: new run, not 400 ────
+// Claude Code resends finished tool_result blocks on compact/follow-up.
+// A 400 aborts autocompact ("Prompt is too long · compaction failed").
+// Empty test pool still answers 502 before any run; anything but 400
+// proves the orphan guard no longer rejects the request.
 function fakeHttpRes() {
   return {
     status: 0,
@@ -362,7 +363,7 @@ function fakeHttpRes() {
   };
 }
 
-test("entry: anthropic tool results with no matching turn -> 400 invalid_request_error", async () => {
+test("entry: anthropic tool results with no matching turn start a new run, not 400", async () => {
   const res = fakeHttpRes();
   await A.handleMessages({
     model: "claude-opus-5",
@@ -370,22 +371,38 @@ test("entry: anthropic tool results with no matching turn -> 400 invalid_request
       { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_deadbeef", content: "x" }] },
     ],
   }, res);
-  assert.equal(res.status, 400);
-  const body = JSON.parse(res.body);
-  assert.equal(body.error.type, "invalid_request_error");
-  assert.match(body.error.message, /no matching pending tool call/);
+  assert.notEqual(res.status, 400, "stale tool_result must not abort compact/follow-up");
+  assert.equal(res.status, 502, "empty pool answers 502 before any run");
+  assert.ok(
+    recentLogs(50).some((e) => e.level === "warn" && /stale tool_result/.test(e.msg)),
+    "the fallback must be logged",
+  );
 });
 
-test("entry: openai tool results with no matching turn -> 400 invalid_request_error", async () => {
+test("entry: openai tool results with no matching turn start a new run, not 400", async () => {
   const res = fakeHttpRes();
   await handleChat({
     model: "x",
     messages: [{ role: "tool", tool_call_id: "call_deadbeef", content: "x" }],
   }, res);
-  assert.equal(res.status, 400);
-  const body = JSON.parse(res.body);
-  assert.equal(body.error.type, "invalid_request_error");
-  assert.match(body.error.message, /no matching pending tool call/);
+  assert.notEqual(res.status, 400, "stale tool_result must not abort compact/follow-up");
+  assert.equal(res.status, 502, "empty pool answers 502 before any run");
+});
+
+test("entry: historical tool_result before the last assistant does not look like a resume", async () => {
+  const res = fakeHttpRes();
+  await A.handleMessages({
+    model: "claude-opus-5",
+    messages: [
+      { role: "user", content: "search this" },
+      { role: "assistant", content: [{ type: "tool_use", id: "toolu_old", name: "WebSearch", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_old", content: "done" }] },
+      { role: "assistant", content: "here is the answer" },
+      { role: "user", content: "follow-up question" },
+    ],
+  }, res);
+  assert.notEqual(res.status, 400, "finished tool rounds in history must not 400");
+  assert.equal(res.status, 502, "empty pool answers 502 before any run");
 });
 
 test("entry: a fresh request without tool results never trips the orphan guard", async () => {

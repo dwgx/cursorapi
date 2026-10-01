@@ -177,6 +177,8 @@ export class RelayTurn {
     this.callIdPrefix = "call_";
     /** Calls arriving while the sink is closed wait here for the next attach to replay them. */
     this.parked = [];
+    /** True once any assistant text has been handed to the sink or pendingText. */
+    this.sawText = false;
   }
 
   #touch() {
@@ -251,6 +253,7 @@ export class RelayTurn {
   #emitText(t) {
     if (!t) return;
     this.#touch();
+    this.sawText = true;
     if (this.sink) this.sink.text(t);
     else this.pendingText += t;
   }
@@ -390,7 +393,13 @@ export class RelayTurn {
   }
 
   get #hasText() {
-    return this.pendingText.length > 0 || (this.sink?.parts?.length ?? 0) > 0;
+    // AnthropicSseWriter stores text in `accum`, not `parts`. After a streamed
+    // assistant event, pendingText is empty and sink.parts is undefined, so
+    // the old check treated the turn as empty and appended result.result —
+    // the client then saw the same paragraph twice.
+    return this.sawText || this.pendingText.length > 0
+      || (this.sink?.parts?.length ?? 0) > 0
+      || (this.sink?.accum?.length ?? 0) > 0;
   }
 }
 
